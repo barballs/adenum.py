@@ -703,5 +703,4 @@ if __name__ == '__main__':
 
     if args.handler:
         args.handler(args, conn, dc)
-        args.handler(args, conn, dc)
     conn.unbind()
