@@ -1,7 +1,7 @@
 # adenum.py
 Remote Active Directory enumeration
 
-## INSTALLATION
+## Installation
 
 You'll need to install ldap3, dnspython, and pysmb:
 ```

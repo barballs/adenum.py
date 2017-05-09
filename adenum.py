@@ -64,13 +64,14 @@ class CachingConnection(ldap3.Connection):
         self.cache = {}
         kwargs['auto_range'] = True
         ldap3.Connection.__init__(self, *args, **kwargs)
-    def search(self, search_base, search_filter, **kwargs):
-        if not kwargs['attributes']:
+    def search(self, search_base, search_filter, search_scopt=ldap3.SUBTREE, **kwargs):
+        if 'attributes' not in kwargs:
             kwargs['attributes'] = []
         kwargs['attributes'].append('range=0-*')
         sha1 = hashlib.new('sha1', b''.join(
             str(a).lower().encode() for a in [search_base, search_filter]+list(kwargs.values()))).digest()
         if sha1 in self.cache:
+            logging.debug('CACHE HIT')
             self.response = self.cache[sha1]
         logging.debug('SEARCH ({}) {} ATTRS {}'.format(search_base, search_filter, ', '.join(kwargs['attributes'])))
         super().search(
@@ -228,7 +229,7 @@ def get_user_info(conn, dc, user):
     base = dc
     user_dn = get_user_dn(conn, dc, args.user)
     conn.search(base, '(&(objectCategory=user)(distinguishedName={}))'.format(user_dn), attributes=['allowedAttributes'])
-    allowed = conn.response[0]['attributes']['allowedAttributes']
+    allowed = set([a.lower() for a in conn.response[0]['attributes']['allowedAttributes']])
     attributes = [
         #'msexchhomeservername',
         #'usncreated',
@@ -272,7 +273,7 @@ def get_user_info(conn, dc, user):
         'lastlogontimestamp',
         'useraccountcontrol',
     ]
-    attrs = [a for a in attributes if a.lower() in [b.lower() for b in allowed]]
+    attrs = [a for a in attributes if a.lower() in allowed]
     conn.search(base, '(&(objectCategory=user)(distinguishedName={}))'.format(user_dn), attributes=attrs)
     return conn.response
 
@@ -281,7 +282,7 @@ def MyMD4():
     return MyMD4Class()
 class MyMD4Class():
     def update(self, p):
-        self.nthash = p.decode('utf-16le').encode()
+        self.nthash = p.decode('utf-16-le').encode()
     def digest(self):
         return self.nthash
 
@@ -299,33 +300,35 @@ def get_default_pwd_policy(args, conn, dc):
     sysvol, rel_path = gpo_path[2:].split('\\', 2)[-2:]
     rel_path += r'\MACHINE\Microsoft\Windows NT\SecEdit\GptTmpl.inf'
     tmp_file = tempfile.NamedTemporaryFile(prefix='GptTmpl_', suffix='.inf')
-    try:
-        from smb.SMBConnection import SMBConnection
-        if args.nthash:
-            import smb.ntlm
-            smb.ntlm.MD4 = MyMD4
-        dc_hostname = args.hostname or get_host_by_addr(args.server, args.server) or get_host_by_addr(args.server)
-        if not dc_hostname:
-            raise socket.herror
-        logging.debug('dc_hostname: '+dc_hostname)
-        use_pysmb = True
-    except (ImportError, socket.herror) as e:
-        if type(e) == ImportError:
-            logging.info('Install pysmb to remove smbclient dependency')
-        elif type(e) == socket.herror:
-            logging.info('Failed to resolve server address')
+    if not args.smbclient:
+        try:
+            from smb.SMBConnection import SMBConnection
+            if args.nthash:
+                import smb.ntlm
+                smb.ntlm.MD4 = MyMD4
+            dc_hostname = args.hostname or get_host_by_addr(args.server, args.server) or get_host_by_addr(args.server)
+            if not dc_hostname:
+                raise socket.herror
+            logging.debug('dc_hostname: '+dc_hostname)
+            use_pysmb = True
+        except (ImportError, socket.herror) as e:
+            if type(e) == ImportError:
+                logging.info('Install pysmb to remove smbclient dependency')
+            elif type(e) == socket.herror:
+                logging.info('Failed to resolve server address')
+            use_pysmb = False
+    else:
         use_pysmb = False
     if use_pysmb:
-        logging.debug('SMBConnection("{}", "{}", "adenum", "{}")'.format(
-            args.username, args.password, dc_hostname))
-        conn = SMBConnection(args.username, args.password, 'adenum', dc_hostname, use_ntlm_v2=True)
-        try:
-            conn.connect(args.server, 445)
-        except:
-            conn.connect(args.server, 139)
+        logging.debug('SMBConnection("{}", "{}", "adenum", "{}", domain="{}")'.format(
+            args.username, args.password, dc_hostname, args.domain))
+        conn = SMBConnection(args.username, args.password, 'adenum', dc_hostname, use_ntlm_v2=True,
+                             domain=args.domain, is_direct_tcp=(args.smb_port != 139))
+        logging.debug('connecting {}:{}'.format(args.server, args.smb_port))
+        conn.connect(args.server, port=args.smb_port)
         attrs, size = conn.retrieveFile(sysvol, rel_path, tmp_file)
     else:
-        cmd = ['smbclient', '--user={}\\{}'.format(args.domain, args.username),
+        cmd = ['smbclient', '-p', str(args.smb_port), '--user={}\\{}'.format(args.domain, args.username),
                '//{}/{}'.format(args.server, sysvol), '-c', 'get "{}" {}'.format(rel_path, tmp_file.name)]
         if args.nthash:
             cmd.insert(1, '--pw-nt-hash')
@@ -374,7 +377,6 @@ def user_handler(args, conn, dc):
             print('Last failed login         ', timestr_or_never(int(a['badPasswordTime'][0])))
             print('Logon count               ', a['logonCount'][0])
             print('Last logon                ', timestr_or_never(int(a['lastLogon'][0])))
-            #print('Last logon                ', timestr_or_never(int(a['lastLogonTimestamp'][0])))
         except:
             pass
         print('')
@@ -395,7 +397,7 @@ def user_handler(args, conn, dc):
         primary_group = [g['dn'] for g in groups if struct.unpack('<H', g['attributes']['objectSid'][0][-4:-2])[0] == int(a['primaryGroupID'][0])][0]
         print('PrimaryGroup               "{}"'.format(primary_group if args.dn else cn(primary_group)))
         local_groups = [g['dn'] for g in groups if dw(int(g['attributes']['groupType'][0])) & 0x4]
-        global_groups = [g['dn'] for g in groups if dw(int(g['attributes']['groupType'][0])) & 0x2]
+        global_groups = [g['dn'] for g in groups if dw(int(g['attributes']['groupType'][0])) & 0x8]
         print('Local Group Memberships   ', ', '.join(map(lambda x:'"{}"'.format(x if args.dn else cn(x)), local_groups)))
         print('Global Group memberships  ', ', '.join(map(lambda x:'"{}"'.format(x if args.dn else cn(x)), global_groups)))
 
@@ -543,6 +545,8 @@ if __name__ == '__main__':
     parser.add_argument('-H', '--hostname', default=None, help='DC hostname. never required')
     parser.add_argument('-d', '--domain', default=None, help='default is to use domain of server')
     parser.add_argument('--port', default=None, type=int, help='default 389 or 636 with --tls')
+    parser.add_argument('--smb-port', dest='smb_port', default=445, type=int, help='default 445')
+    parser.add_argument('--smbclient', action='store_true', default=False, help='force use of smbclient over pysmb')
     parser.add_argument('--verbose', action='store_true', default=False)
     parser.add_argument('-v', '--version', type=int, choices=[1,2,3], default=3, help='specify ldap version')
     parser.add_argument('--debug', action='store_true', default=False, help='implies --verbose')
@@ -643,14 +647,13 @@ if __name__ == '__main__':
             logging.info('\t'+a)
         args.server = addrs[0]
 
-    #dc = ','.join(['dc='+a for a in args.domain.split('.')])
     dc = 'dc='+args.domain.replace('.', ',dc=')
     logging.debug('DC     '+args.server)
     logging.debug('PORT   '+str(args.port))
     logging.debug('DOMAIN '+args.domain)
     logging.debug('LOGIN  '+args.username)
     if not is_private_addr(args.server) and not args.insecure:
-        raise Warning('Aborting due to public LDAP server')
+        raise Warning('Aborting due to public LDAP server. use --insecure to override')
 
     if args.info and args.schema:
         get_info = ldap3.ALL
@@ -661,7 +664,6 @@ if __name__ == '__main__':
     else:
         get_info = None
     
-    # ntlm hashlib.new('md4', args.password.encode('utf-16le')).hexdigest()
     # avail: PROTOCOL_SSLv23, PROTOCOL_TLSv1, PROTOCOL_TLSv1_1, PROTOCOL_TLSv1_2
     username = None
     password = None
