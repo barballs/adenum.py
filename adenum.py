@@ -14,8 +14,9 @@ import datetime
 import tempfile
 # non-std
 import ldap3
+# NOTE: dnspython and pysmb are imported on demand
 
-DESCRIPTION = 'Enumerate ActiveDirectory users, groups, and password policies'
+DESCRIPTION = 'Enumerate ActiveDirectory users, groups, computers, and password policies'
 
 '''
 = SUMMARY =
@@ -96,16 +97,41 @@ def is_private_addr(addr):
             return True
     return False
 
+def is_addr(a):
+    try:
+        socket.inet_aton(a)
+    except:
+        return False
+    return True
+
+def get_attr(o, attr, default=None, trans=None):
+    ''' given a dict object returned by ldap, return the first named attribute or if it
+    does not exists, return default '''
+    if not o.get('attributes', None):
+        return default
+    v = o['attributes'].get(attr, None)
+    if not v:
+        return default
+    if type(v) == list:
+        if len(v) == 0:
+            return default
+        v = v[0]
+    if trans:
+        return trans(v)
+    return v
+
 def get_resolver(name_server=None):
     import dns.resolver
     if name_server:
         resolver = dns.resolver.Resolver()
         resolver.nameservers = [name_server]
     else:
+        # use nameserver configured for the host
         resolver = dns.resolver
     return resolver
 
 def get_dc(domain, name_server=None):
+    ''' return the domain controller for a given domain '''
     resolver = get_resolver(name_server)
     logging.debug('Resolving _ldap._tcp.'+domain)
     try:
@@ -115,6 +141,7 @@ def get_dc(domain, name_server=None):
     return get_addr_by_host(str(answer[0]).split()[-1], name_server)
 
 def get_addrs_by_host(host, name_server=None):
+    ''' return list of addresses for the host '''
     resolver = get_resolver(name_server)
     try:
         answer = resolver.query(host)
@@ -158,6 +185,12 @@ def get_groups(conn, dc):
     #    cn=users,cn=builtins,cn=mydomain,cn=com
     base = dc
     conn.search(base, '(objectCategory=group)', attributes=['objectSid', 'groupType'])
+    return [g for g in conn.response if g.get('dn', None)]
+
+def get_computers(conn, dc):
+    attributes = ['name', 'dNSHostName', 'whenCreated', 'operatingSystem', 'operatingSystemServicePack',
+                  'lastLogon', 'logonCount']
+    conn.search(dc, '(objectCategory=computer)', attributes=attributes)
     return [g for g in conn.response if g.get('dn', None)]
 
 def gid_from_sid(sid):
@@ -346,27 +379,28 @@ def get_default_pwd_policy(args, conn, dc):
     config.read_string(inf)
     return config['System Access']
 
+def timestr_or_never(t):
+    return 'Never' if t in [0, 0x7FFFFFFFFFFFFFFF] else ft_to_str(t)
+
 def user_handler(args, conn, dc):
-    def timestr_or_never(t):
-        return  'Never' if t in [0, 0x7FFFFFFFFFFFFFFF] else ft_to_str(t)
     for u in get_user_info(conn, dc, args.user):
         if not u.get('attributes'):
             continue
         a = u['attributes']
         # https://msdn.microsoft.com/en-us/library/ms680832.aspx
         print('User name                 ', a['name'][0])
-        #print('Full Name                 ', a['name'][0], first_or_blank(a['givenName']), first_or_blank(a['middleName']))
+        print('Full Name                 ', get_attr(a, 'givenName', ''), get_attr(a, 'middleName', ''))
         print('Distinguished Name        ', a['distinguishedName'][0])
-        print('UserPrincipalName         ', first_or_blank(a['userPrincipalName']))
+        print('UserPrincipalName         ', get_attr(a, 'userPrincipalName', ''))
         print('Comment                   ', ','.join(a['description']))
         print("User's comment            ", ','.join(a['info']))
         print('Display name              ', ' '.join(a['displayName']))
         print('E-mail                    ', ' '.join(a['mail']))
         print('Job title                 ', ' '.join(a['title']))
+        print('Account created           ', gt_to_str(a['whenCreated'][0]))
+        print('Account active            ', 'No' if int(a['userAccountControl'][0]) & 0x2 else 'Yes')
 
         try:
-            print('Account created           ', gt_to_str(a['whenCreated'][0]))
-            print('Account active            ', 'No' if int(a['userAccountControl'][0]) & 0x2 else 'Yes')
             print('Account expires           ', timestr_or_never(int(a['accountExpires'][0])))
             if len(a['lockoutTime']) == 0 or int(a['lockoutTime'][0]) == 0:
                 print('Lockout time              ', 'No')
@@ -429,6 +463,22 @@ def group_handler(args, conn, dc):
             except:
                 print(cn(u['dn']))
 
+def computers_handler(args, conn, dc):
+    '''     attributes = ['name', 'dNSHostName', 'whenCreated', 'operatingSystem', 'operatingSystemServicePack',
+                  'lastLogon', 'logonCount']
+    '''
+    computers = get_computers(conn, dc)
+    for c in computers:
+        info = '"{} {}" "created {}"'.format(
+            get_attr(c, 'operatingSystem', ''),
+            get_attr(c, 'operatingSystemServicePack', ''),
+            get_attr(c, 'whenCreated', '', gt_to_str),
+#            get_attr(c, 'lastLogon', '', lambda x: interval_to_minutes(-int(x)) // 1440),
+        )
+        if args.dn:
+            print(c.get('dn', c), info)
+        else:
+            print(cn(c['dn']), info)
 
 def policy_handler(args, conn, dc):
     pol = get_default_pwd_policy(args, conn, dc)
@@ -492,7 +542,7 @@ def query_handler(args, conn, dc):
         if 'dn' in r:
             print(r['dn'])
             for a in args.attributes:
-                print(first_or_blank(r['attributes'][a]))
+                print(get_attr(r, a, ''))
             print('')
 
 def modify_handler(args, conn, dc):
@@ -506,9 +556,6 @@ def modify_handler(args, conn, dc):
 def cn(dn):
     ''' return common name from distinguished name '''
     return dn.split(',')[0].split('=')[-1]
-
-def first_or_blank(l):
-    return l[0] if len(l) else ''
 
 def dt_to_lt(dt):
     ''' convert datetime object to localtime '''
@@ -541,7 +588,7 @@ if __name__ == '__main__':
     parser.add_argument('-p', '--password', default=hashlib.new('md4', b'').hexdigest(), help='password')
     parser.add_argument('--nthash', action='store_true', default=False, help='password is an NTLM hash')
     parser.add_argument('-P', dest='prompt', default=False, action='store_true', help='prompt for password')
-    parser.add_argument('-s', '--server', help='server ip or name. default: dns lookup on domain')
+    parser.add_argument('-s', '--server', help='domain controller addr or name. default: dns lookup on domain')
     parser.add_argument('-H', '--hostname', default=None, help='DC hostname. never required')
     parser.add_argument('-d', '--domain', default=None, help='default is to use domain of server')
     parser.add_argument('--port', default=None, type=int, help='default 389 or 636 with --tls')
@@ -569,14 +616,20 @@ if __name__ == '__main__':
     user_parser = subparsers.add_parser('user', help='get user info')
     user_parser.set_defaults(handler=user_handler)
     user_parser.add_argument('user', help='user to search')
+
     groups_parser = subparsers.add_parser('groups', help='list all groups')
     groups_parser.set_defaults(handler=groups_handler)
     group_parser = subparsers.add_parser('group', help='get group info')
     group_parser.set_defaults(handler=group_handler)
     group_parser.add_argument('group', help='group to search')
     group_parser.add_argument('-m', '--members', help='retrieve group members')
+
     policy_parser = subparsers.add_parser('policy', help='get policy info')
     policy_parser.set_defaults(handler=policy_handler)
+
+    computers_parser = subparsers.add_parser('computers', help='list computers')
+    computers_parser.set_defaults(handler=computers_handler)
+
     query_parser = subparsers.add_parser('query', help='perform custom ldap query')
     query_parser.set_defaults(handler=query_handler)
     query_parser.add_argument('-b', '--base', help='search base. default is DC')
@@ -625,6 +678,11 @@ if __name__ == '__main__':
         else:
             print('Failed to find DC/domain using system settings')
             sys.exit()
+
+    if not is_addr(args.server):
+        logging.debug('Resolving '+args.server)
+        args.server = socket.gethostbyname(args.server)
+        logging.debug('Answer '+args.server)
 
     if not args.domain or args.domain.count('.') == 0:
         if not args.server:
