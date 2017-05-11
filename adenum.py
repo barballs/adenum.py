@@ -143,14 +143,16 @@ def get_dc(domain, name_server=None):
 def get_addrs_by_host(host, name_server=None):
     ''' return list of addresses for the host '''
     resolver = get_resolver(name_server)
+    logging.debug('Resolving {} via {}'.format(host, name_server or 'system'))
     try:
         answer = resolver.query(host)
     except Exception:
-        return None
+        return []
     return [a.address for a in answer]
 
 def get_addr_by_host(host, name_server=None):
-    return get_addrs_by_host(host, name_server)[0]
+    addrs = get_addrs_by_host(host, name_server)
+    return addrs[0] if len(addrs) else []
 
 def get_fqdn_by_addr(addr, name_server=None):
     resolver = get_resolver(name_server)
@@ -417,21 +419,26 @@ def user_handler(args, conn, dc):
 
         try:
             print('Password last set         ', timestr_or_never(int(a['pwdLastSet'][0])))
-            #0x00010000 never
             print('Password expires          ', 'No' if int(a['userAccountControl'][0]) & 0x10000 else 'Yes')
             print('Password changeable')
             print('User may change password  ', 'No' if int(a['userAccountControl'][0]) & 0x40 else 'Yes')
             print('')
             print('Workstations allowed      ', ', '.join(a['userWorkstations']))
             print('Logon script              ', ', '.join(a['scriptPath']))
-            #print('Logon hours allowed       ', a['logonHours'])
         except:
             pass
+
         groups = get_user_groups(conn, dc, args.user)
         primary_group = [g['dn'] for g in groups if struct.unpack('<H', g['attributes']['objectSid'][0][-4:-2])[0] == int(a['primaryGroupID'][0])][0]
         print('PrimaryGroup               "{}"'.format(primary_group if args.dn else cn(primary_group)))
-        local_groups = [g['dn'] for g in groups if dw(int(g['attributes']['groupType'][0])) & 0x4]
-        global_groups = [g['dn'] for g in groups if dw(int(g['attributes']['groupType'][0])) & 0x8]
+        GROUP_SYSTEM = 0x1
+        GROUP_GLOBAL = 0x2
+        GROUP_DOMAIN_LOCAL = 0x4
+        GROUP_UNIVERSAL = 0x8
+        XGROUP_LOCAL = GROUP_SYSTEM | GROUP_DOMAIN_LOCAL
+        XGROUP_GLOBAL = GROUP_GLOBAL | GROUP_UNIVERSAL
+        local_groups = [g['dn'] for g in groups if dw(int(g['attributes']['groupType'][0])) & XGROUP_LOCAL]
+        global_groups = [g['dn'] for g in groups if dw(int(g['attributes']['groupType'][0])) & XGROUP_GLOBAL]
         print('Local Group Memberships   ', ', '.join(map(lambda x:'"{}"'.format(x if args.dn else cn(x)), local_groups)))
         print('Global Group memberships  ', ', '.join(map(lambda x:'"{}"'.format(x if args.dn else cn(x)), global_groups)))
 
@@ -475,6 +482,11 @@ def computers_handler(args, conn, dc):
             get_attr(c, 'whenCreated', '', gt_to_str),
 #            get_attr(c, 'lastLogon', '', lambda x: interval_to_minutes(-int(x)) // 1440),
         )
+        hostname = cn(c['dn']) + '.' + args.domain
+        if args.resolve:
+            addr = get_addr_by_host(hostname, args.name_server) or get_addr_by_host(hostname, args.server)
+            if addr:
+                info = addr + ' ' + info
         if args.dn:
             print(c.get('dn', c), info)
         else:
@@ -586,29 +598,29 @@ if __name__ == '__main__':
     user_parser.add_argument('-u', '--username', default='', help='AD user. default is null user.')
     user_parser.add_argument('--anonymous', action='store_true', help='anonymous access')
     parser.add_argument('-p', '--password', default=hashlib.new('md4', b'').hexdigest(), help='password')
-    parser.add_argument('--nthash', action='store_true', default=False, help='password is an NTLM hash')
-    parser.add_argument('-P', dest='prompt', default=False, action='store_true', help='prompt for password')
+    parser.add_argument('--nthash', action='store_true', help='password is an NTLM hash')
+    parser.add_argument('-P', dest='prompt', action='store_true', help='prompt for password')
     parser.add_argument('-s', '--server', help='domain controller addr or name. default: dns lookup on domain')
-    parser.add_argument('-H', '--hostname', default=None, help='DC hostname. never required')
-    parser.add_argument('-d', '--domain', default=None, help='default is to use domain of server')
-    parser.add_argument('--port', default=None, type=int, help='default 389 or 636 with --tls')
+    parser.add_argument('-H', '--hostname', help='DC hostname. never required')
+    parser.add_argument('-d', '--domain', help='default is to use domain of server')
+    parser.add_argument('--port', type=int, help='default 389 or 636 with --tls')
     parser.add_argument('--smb-port', dest='smb_port', default=445, type=int, help='default 445')
-    parser.add_argument('--smbclient', action='store_true', default=False, help='force use of smbclient over pysmb')
-    parser.add_argument('--verbose', action='store_true', default=False)
+    parser.add_argument('--smbclient', action='store_true', help='force use of smbclient over pysmb')
+    parser.add_argument('--verbose', action='store_true')
     parser.add_argument('-v', '--version', type=int, choices=[1,2,3], default=3, help='specify ldap version')
-    parser.add_argument('--debug', action='store_true', default=False, help='implies --verbose')
-    parser.add_argument('--dn', action='store_true', default=False, help='list distinguished names of AD objects')
-    parser.add_argument('--info', action='store_true', default=False, help='get server info')
-    parser.add_argument('--schema', action='store_true', default=False, help='get server schema')
-    parser.add_argument('--insecure', action='store_true', default=False, help='ignore invalid tls certs')
-    parser.add_argument('--system', action='store_true', default=False, help='use system DHCP settings to find DC (/etc/resolv.conf)')
+    parser.add_argument('--debug', action='store_true', help='implies --verbose')
+    parser.add_argument('--name-server', dest='name_server', help='specify name server. typically this is the domain controller')
+    parser.add_argument('--dn', action='store_true', help='list distinguished names of AD objects')
+    parser.add_argument('--info', action='store_true', help='get server info')
+    parser.add_argument('--schema', action='store_true', help='get server schema')
+    parser.add_argument('--insecure', action='store_true', help='ignore invalid tls certs')
     #parser.add_argument('--cert', help='')
     #parser.add_argument('--auth', default='ntlm', type=str.lower, choices=['ntlm', 'kerb'], help='auth type')
     parser.set_defaults(handler=None)
 
     tls_group = parser.add_mutually_exclusive_group()
-    tls_group.add_argument('--tls', action='store_true', default=False, help='initiate connection with TLS')
-    tls_group.add_argument('--start-tls', dest='starttls', action='store_true', default=False, help='use START_TLS')
+    tls_group.add_argument('--tls', action='store_true', help='initiate connection with TLS')
+    tls_group.add_argument('--start-tls', dest='starttls', action='store_true',  help='use START_TLS')
 
     subparsers = parser.add_subparsers(help='choose an action')
     users_parser = subparsers.add_parser('users', help='list all users')
@@ -629,6 +641,7 @@ if __name__ == '__main__':
 
     computers_parser = subparsers.add_parser('computers', help='list computers')
     computers_parser.set_defaults(handler=computers_handler)
+    computers_parser.add_argument('-r', '--resolve', action='store_true', help='resolve hostnames')
 
     query_parser = subparsers.add_parser('query', help='perform custom ldap query')
     query_parser.set_defaults(handler=query_handler)
@@ -638,7 +651,7 @@ if __name__ == '__main__':
     query_parser.add_argument('-s', '--scope', type=str.lower,  default='base', choices=['base', 'level', 'subtree'],
                               help='search scope')
     attr_group = query_parser.add_mutually_exclusive_group()
-    attr_group.add_argument('--allowed', default=False, action='store_true', help='display allowed attributes')
+    attr_group.add_argument('--allowed', action='store_true', help='display allowed attributes')
     attr_group.add_argument('attributes', default=[], nargs='*', help='attributes to retrieve')
     modify_parser = subparsers.add_parser('modify', help='modify an object attribute')
     modify_parser.set_defaults(handler=modify_handler)
@@ -655,34 +668,16 @@ if __name__ == '__main__':
     elif args.verbose:
         logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
 
-    # check resolv.conf for possible domains and nameservers (typically DCs)
-    if args.system:
-        if os.path.exists('/etc/resolv.conf'):
-            with open('/etc/resolv.conf') as fp:
-                lines = [l for l in fp.readlines() if l[0] != '#']
-            nameservers = []
-            domains = []
-            for l in lines:
-                cols = l.split()
-                if cols[0] == 'search':
-                    domains += cols[1:]
-                elif cols[0] == 'nameserver':
-                    if cols[1].split('.')[0] != '127':
-                        nameservers.append(cols[1])
-            if len(nameservers) and not args.server:
-                args.server = nameservers[0]
-                logging.debug('domain '+nameservers[0])
-            if len(domains) and not args.domain:
-                args.domain = domains[0]
-                logging.debug('search '+domains[0])
-        else:
-            print('Failed to find DC/domain using system settings')
-            sys.exit()
-
     if not is_addr(args.server):
         logging.debug('Resolving '+args.server)
         args.server = socket.gethostbyname(args.server)
         logging.debug('Answer '+args.server)
+
+    if args.username.find('\\') != -1:
+        if args.domain:
+            args.username = args.username.split('\\')[-1]
+        else:
+            args.domain, args.username = args.username.split('\\')
 
     if not args.domain or args.domain.count('.') == 0:
         if not args.server:
@@ -691,7 +686,7 @@ if __name__ == '__main__':
         args.domain = get_fqdn_by_addr(args.server, args.server).split('.', maxsplit=1)[-1]
         logging.info('Found domain: '+args.domain)
 
-    # determine port if non specified
+    # determine port if not specified
     if not args.port:
         if args.tls:
             args.port = 636
@@ -699,7 +694,7 @@ if __name__ == '__main__':
             args.port = 389
 
     if not args.server:
-        addrs = get_addrs_by_host(args.domain)
+        addrs = get_addrs_by_host(args.domain, args.name_server)
         logging.info('Resolved '+args.domain)
         for a in addrs:
             logging.info('\t'+a)
@@ -710,6 +705,7 @@ if __name__ == '__main__':
     logging.debug('PORT   '+str(args.port))
     logging.debug('DOMAIN '+args.domain)
     logging.debug('LOGIN  '+args.username)
+    logging.debug('DNS    '+ (args.name_server or 'default'))
     if not is_private_addr(args.server) and not args.insecure:
         raise Warning('Aborting due to public LDAP server. use --insecure to override')
 
