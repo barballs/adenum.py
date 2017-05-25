@@ -38,6 +38,7 @@ from the sysvol file share.
 NOTE: when specifying a domain with -d, ensure that your system
 is configured to use the DNS server for the domain. Alternatively,
 you can specify your domain controller with -s if it is a name server.
+You may also specify a name server with --name-server.
 
 List password policies
     python3 adenum.py -u USER -P -d mydomain.local policy
@@ -58,6 +59,8 @@ user account
 https://msdn.microsoft.com/en-us/library/ms680832.aspx
 '''
 
+logger = logging.getLogger(__name__)
+
 class CachingConnection(ldap3.Connection):
     ''' Subclass of ldap3.Connection which uses the range attribute
     to gather all results. It will also cache searches. '''
@@ -68,19 +71,29 @@ class CachingConnection(ldap3.Connection):
     def search(self, search_base, search_filter, search_scopt=ldap3.SUBTREE, **kwargs):
         if 'attributes' not in kwargs:
             kwargs['attributes'] = []
-        kwargs['attributes'].append('range=0-*')
+        if not len([a for a in kwargs['attributes'] if a.startswith('range=')]):
+            kwargs['attributes'].append('range=0-*')
         sha1 = hashlib.new('sha1', b''.join(
             str(a).lower().encode() for a in [search_base, search_filter]+list(kwargs.values()))).digest()
         if sha1 in self.cache:
-            logging.debug('CACHE HIT')
+            logger.debug('CACHE HIT')
             self.response = self.cache[sha1]
-        logging.debug('SEARCH ({}) {} ATTRS {}'.format(search_base, search_filter, ', '.join(kwargs['attributes'])))
+            return
+        logger.debug('SEARCH ({}) {} ATTRS {}'.format(search_base, search_filter, ', '.join(kwargs['attributes'])))
         super().search(
             search_base,
             search_filter,
             **kwargs
         )
-        logging.debug('RESULT '+str(self.result))
+        # return only the results
+        response = []
+        for obj in self.response:
+            if obj['type'].lower() == 'searchresentry':
+                for a in [a for a in obj['attributes'] if a.startswith('range=')]:
+                    del obj['attributes'][a]
+                response.append(obj)
+        self.response = response
+        logger.debug('RESULT '+str(self.result))
         self.cache[sha1] = self.response
 
 private_addrs = (
@@ -133,30 +146,40 @@ def get_resolver(name_server=None):
 def get_dc(domain, name_server=None):
     ''' return the domain controller for a given domain '''
     resolver = get_resolver(name_server)
-    logging.debug('Resolving _ldap._tcp.'+domain)
+    logger.debug('Resolving _ldap._tcp.'+domain)
     try:
         answer = resolver.query('_ldap._tcp.'+domain, 'SRV')
+        logger.debug('Answer '+str(answer[0].split()[-1]))
     except Exception:
-        return None
+        pass
+    if not answer:
+        logger.debug('Resolving '+domain)
+        try:
+            answer = resolver.query(domain)
+            logger.debug('Answer '+str(answer[0].split()[-1]))
+        except Exception:
+            pass
     return get_addr_by_host(str(answer[0]).split()[-1], name_server)
 
 def get_addrs_by_host(host, name_server=None):
     ''' return list of addresses for the host '''
     resolver = get_resolver(name_server)
-    logging.debug('Resolving {} via {}'.format(host, name_server or 'system'))
+    logger.debug('Resolving {} via {}'.format(host, name_server or 'system'))
     try:
         answer = resolver.query(host)
+        logger.debug('Answer '+', '.join([a.address for a in answer]))
     except Exception:
         return []
     return [a.address for a in answer]
 
 def get_addr_by_host(host, name_server=None):
     addrs = get_addrs_by_host(host, name_server)
-    return addrs[0] if len(addrs) else []
+    return addrs[0] if len(addrs) else None
 
 def get_fqdn_by_addr(addr, name_server=None):
     resolver = get_resolver(name_server)
     arpa = '.'.join(reversed(addr.split('.'))) + '.in-addr.arpa.'
+    logger.debug('Resolving '+arpa)
     try:
         answer = resolver.query(arpa, 'PTR', 'IN')
     except Exception:
@@ -189,9 +212,9 @@ def get_groups(conn, dc):
     conn.search(base, '(objectCategory=group)', attributes=['objectSid', 'groupType'])
     return [g for g in conn.response if g.get('dn', None)]
 
-def get_computers(conn, dc):
-    attributes = ['name', 'dNSHostName', 'whenCreated', 'operatingSystem', 'operatingSystemServicePack',
-                  'lastLogon', 'logonCount']
+def get_computers(conn, dc, attributes=[]):
+    attributes = list(set(attributes + ['name', 'dNSHostName', 'whenCreated', 'operatingSystem',
+                                        'operatingSystemServicePack', 'lastLogon', 'logonCount']))
     conn.search(dc, '(objectCategory=computer)', attributes=attributes)
     return [g for g in conn.response if g.get('dn', None)]
 
@@ -331,7 +354,7 @@ def get_default_pwd_policy(args, conn, dc):
         gpo_path = conn.response[0]['attributes']['gPCFileSysPath'][0]
     else:
         gpo_path = r'\\' + args.domain + r'\Policies\{31B2F340-016D-11D2-945F-00C04FB984F9}\MACHINE'
-    logging.debug('GPOPath '+gpo_path)
+    logger.debug('GPOPath '+gpo_path)
     sysvol, rel_path = gpo_path[2:].split('\\', 2)[-2:]
     rel_path += r'\MACHINE\Microsoft\Windows NT\SecEdit\GptTmpl.inf'
     tmp_file = tempfile.NamedTemporaryFile(prefix='GptTmpl_', suffix='.inf')
@@ -344,22 +367,22 @@ def get_default_pwd_policy(args, conn, dc):
             dc_hostname = args.hostname or get_host_by_addr(args.server, args.server) or get_host_by_addr(args.server)
             if not dc_hostname:
                 raise socket.herror
-            logging.debug('dc_hostname: '+dc_hostname)
+            logger.debug('dc_hostname: '+dc_hostname)
             use_pysmb = True
         except (ImportError, socket.herror) as e:
             if type(e) == ImportError:
-                logging.info('Install pysmb to remove smbclient dependency')
+                logger.info('Install pysmb to remove smbclient dependency')
             elif type(e) == socket.herror:
-                logging.info('Failed to resolve server address')
+                logger.info('Failed to resolve server address')
             use_pysmb = False
     else:
         use_pysmb = False
     if use_pysmb:
-        logging.debug('SMBConnection("{}", "{}", "adenum", "{}", domain="{}")'.format(
+        logger.debug('SMBConnection("{}", "{}", "adenum", "{}", domain="{}")'.format(
             args.username, args.password, dc_hostname, args.domain))
         conn = SMBConnection(args.username, args.password, 'adenum', dc_hostname, use_ntlm_v2=True,
                              domain=args.domain, is_direct_tcp=(args.smb_port != 139))
-        logging.debug('connecting {}:{}'.format(args.server, args.smb_port))
+        logger.debug('connecting {}:{}'.format(args.server, args.smb_port))
         conn.connect(args.server, port=args.smb_port)
         attrs, size = conn.retrieveFile(sysvol, rel_path, tmp_file)
     else:
@@ -367,17 +390,17 @@ def get_default_pwd_policy(args, conn, dc):
                '//{}/{}'.format(args.server, sysvol), '-c', 'get "{}" {}'.format(rel_path, tmp_file.name)]
         if args.nthash:
             cmd.insert(1, '--pw-nt-hash')
-        logging.info('Running '+' '.join(cmd))
+        logger.info('Running '+' '.join(cmd))
         result = subprocess.run(cmd, input=args.password.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        logging.debug(result.stdout.decode())
-        logging.debug(result.stderr.decode())
+        logger.debug(result.stdout.decode())
+        logger.debug(result.stderr.decode())
     tmp_file.seek(0)
     inf = tmp_file.read()
     if inf[:2] == b'\xff\xfe':
         inf = inf.decode('utf-16')
     else:
         inf = inf.decode()
-    config = configparser.ConfigParser()
+    config = configparser.ConfigParser(delimiters=('=', ':', ','))
     config.read_string(inf)
     return config['System Access']
 
@@ -474,23 +497,25 @@ def computers_handler(args, conn, dc):
     '''     attributes = ['name', 'dNSHostName', 'whenCreated', 'operatingSystem', 'operatingSystemServicePack',
                   'lastLogon', 'logonCount']
     '''
-    computers = get_computers(conn, dc)
+    computers = get_computers(conn, dc, args.attributes)
     for c in computers:
-        info = '"{} {}" "created {}"'.format(
-            get_attr(c, 'operatingSystem', ''),
-            get_attr(c, 'operatingSystemServicePack', ''),
-            get_attr(c, 'whenCreated', '', gt_to_str),
-#            get_attr(c, 'lastLogon', '', lambda x: interval_to_minutes(-int(x)) // 1440),
-        )
+        info = ''
+        for a in sorted(c['attributes'].keys()):
+            if a.lower() in ['whencreated']:
+                info += '{}: {}\n'.format(a, get_attr(c, a, '', gt_to_str))
+            elif a.lower() in ['lastlogon']:
+                info += '{}: {}\n'.format(a, get_attr(c, a, '', lambda x:ft_to_str(int(x))))
+            else:
+                info += '{}: {}\n'.format(a, get_attr(c, a, ''))
         hostname = cn(c['dn']) + '.' + args.domain
         if args.resolve:
             addr = get_addr_by_host(hostname, args.name_server) or get_addr_by_host(hostname, args.server)
             if addr:
-                info = addr + ' ' + info
+                hostname += ' ({})'.format(addr)
         if args.dn:
-            print(c.get('dn', c), info)
+            print(c.get('dn', c), info, sep=os.linesep)
         else:
-            print(cn(c['dn']), info)
+            print(cn(c['dn']), info, sep=os.linesep)
 
 def policy_handler(args, conn, dc):
     pol = get_default_pwd_policy(args, conn, dc)
@@ -533,7 +558,7 @@ def query_handler(args, conn, dc):
         scope = ldap3.LEVEL
     elif args.scope.lower() == 'base':
         scope = ldap3.BASE
-    elif args.scope.lower() == 'subtree':
+    elif args.scope.lower() in ['sub', 'subtree']:
         scope = ldap3.SUBTREE
     else:
         raise ValueError('scope must be either "level", "base", or "subtree"')
@@ -544,9 +569,11 @@ def query_handler(args, conn, dc):
         base = dc
 
     if args.allowed:
-        response = custom_query(conn, base, args.filter, scope=scope, attrs=['allowedAttributes'])
+        # range doesn't seem to work...
+        response = custom_query(conn, base, args.filter, scope=scope, attrs=['allowedAttributes', 'range=0-1'])
+        print('AllowedAttributes')
         for a in conn.response[0]['attributes']['allowedAttributes']:
-            print(a)
+            print('\t', a)
         return
 
     response = custom_query(conn, base, args.filter, scope=scope, attrs=args.attributes)
@@ -554,7 +581,7 @@ def query_handler(args, conn, dc):
         if 'dn' in r:
             print(r['dn'])
             for a in args.attributes:
-                print(get_attr(r, a, ''))
+                print(a, get_attr(r, a, ''))
             print('')
 
 def modify_handler(args, conn, dc):
@@ -563,7 +590,7 @@ def modify_handler(args, conn, dc):
     raise NotImplementedError
     action_map = {'add':ldap3.MODIFY_ADD, 'del':ldap3.MODIFY_DELETE, 'inc':ldap3.MODIFY_INCREMENT, 'replace':ldap3.MODIFY_REPLACE}
     conn.modify(dn, {args.attribute:[(ldap3.MODIFY_REPLACE, args.values)]})
-    logging.debug(conn.result)
+    logger.debug(conn.result)
 
 def cn(dn):
     ''' return common name from distinguished name '''
@@ -642,6 +669,7 @@ if __name__ == '__main__':
     computers_parser = subparsers.add_parser('computers', help='list computers')
     computers_parser.set_defaults(handler=computers_handler)
     computers_parser.add_argument('-r', '--resolve', action='store_true', help='resolve hostnames')
+    computers_parser.add_argument('attributes', nargs='*', help='additional attributes to retrieve')
 
     query_parser = subparsers.add_parser('query', help='perform custom ldap query')
     query_parser.set_defaults(handler=query_handler)
@@ -662,16 +690,23 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    #logging.getLogger('ldap3').setLevel(logging.WARNING)
     if args.debug:
-        logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s]:%(lineno)s %(message)s')
+        logger.setLevel(logging.DEBUG)
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter('[%(levelname)s]:%(lineno)s %(message)s'))
+        logger.addHandler(h)
     elif args.verbose:
-        logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+        logger.setLevel(logging.INFO)
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter('[%(levelname)s] %(message)s'))
+        logger.addHandler(h)
 
-    if not is_addr(args.server):
-        logging.debug('Resolving '+args.server)
-        args.server = socket.gethostbyname(args.server)
-        logging.debug('Answer '+args.server)
+    if args.server and not is_addr(args.server):
+        # resolve DC hostname
+        args.server = get_addr_by_host(args.server, args.name_server)
+        if not args.server:
+            print('Failed to resolve DC hostname')
+            sys.exit()
 
     if args.username.find('\\') != -1:
         if args.domain:
@@ -680,11 +715,17 @@ if __name__ == '__main__':
             args.domain, args.username = args.username.split('\\')
 
     if not args.domain or args.domain.count('.') == 0:
+        args.domain = None
         if not args.server:
-            print('must supply at least 1 of --domain, --server, --system')
+            if args.name_server:
+                args.domain = get_fqdn_by_addr(args.name_server, args.name_server)
+        else:
+            args.domain = get_fqdn_by_addr(args.server, args.name_server or args.server)
+        if not args.domain:
+            print('failed to get domain. try supply the fqdn with --domain')
             sys.exit()
-        args.domain = get_fqdn_by_addr(args.server, args.server).split('.', maxsplit=1)[-1]
-        logging.info('Found domain: '+args.domain)
+        args.domain = args.domain.split('.', maxsplit=1)[-1]
+        logger.info('Found domain: '+args.domain)
 
     # determine port if not specified
     if not args.port:
@@ -694,18 +735,20 @@ if __name__ == '__main__':
             args.port = 389
 
     if not args.server:
-        addrs = get_addrs_by_host(args.domain, args.name_server)
-        logging.info('Resolved '+args.domain)
-        for a in addrs:
-            logging.info('\t'+a)
-        args.server = addrs[0]
+        # attempt to find a DC
+        logger.info('Looking for domain controller for '+args.domain)
+        #addrs = get_addrs_by_host(args.domain, args.name_server)
+        args.server = get_dc(args.domain, args.name_server)
+        if not args.server:
+            print('Failed to find a domain controller')
+        logger.info('Found a domain controller for {} at {}'.format(args.domain, args.server))
 
     dc = 'dc='+args.domain.replace('.', ',dc=')
-    logging.debug('DC     '+args.server)
-    logging.debug('PORT   '+str(args.port))
-    logging.debug('DOMAIN '+args.domain)
-    logging.debug('LOGIN  '+args.username)
-    logging.debug('DNS    '+ (args.name_server or 'default'))
+    logger.debug('DC     '+args.server)
+    logger.debug('PORT   '+str(args.port))
+    logger.debug('DOMAIN '+args.domain)
+    logger.debug('LOGIN  '+args.username)
+    logger.debug('DNS    '+ (args.name_server or 'default'))
     if not is_private_addr(args.server) and not args.insecure:
         raise Warning('Aborting due to public LDAP server. use --insecure to override')
 
@@ -733,7 +776,7 @@ if __name__ == '__main__':
             password = '00000000000000000000000000000000:'+args.password
         else:
             password = args.password
-            logging.debug('NTHASH '+hashlib.new('md4', password.encode('utf-16-le')).hexdigest())
+            logger.debug('NTHASH '+hashlib.new('md4', password.encode('utf-16-le')).hexdigest())
 
     tls_config = ldap3.Tls(validate=ssl.CERT_NONE if args.insecure else ssl.CERT_OPTIONAL,
                            version=ssl.PROTOCOL_TLSv1)
@@ -755,7 +798,7 @@ if __name__ == '__main__':
     if not conn.bound:
         print('Error: failed to bind')
         sys.exit()
-    logging.debug(conn.extend.standard.who_am_i())
+    logger.debug(conn.extend.standard.who_am_i())
 
     if args.handler:
         args.handler(args, conn, dc)
