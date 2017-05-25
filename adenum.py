@@ -68,18 +68,20 @@ class CachingConnection(ldap3.Connection):
         self.cache = {}
         kwargs['auto_range'] = True
         ldap3.Connection.__init__(self, *args, **kwargs)
-    def search(self, search_base, search_filter, search_scopt=ldap3.SUBTREE, **kwargs):
+    def search(self, search_base, search_filter, search_scope=ldap3.SUBTREE, **kwargs):
         if 'attributes' not in kwargs:
             kwargs['attributes'] = []
         if not len([a for a in kwargs['attributes'] if a.startswith('range=')]):
             kwargs['attributes'].append('range=0-*')
+
         sha1 = hashlib.new('sha1', b''.join(
             str(a).lower().encode() for a in [search_base, search_filter]+list(kwargs.values()))).digest()
         if sha1 in self.cache:
             logger.debug('CACHE HIT')
             self.response = self.cache[sha1]
             return
-        logger.debug('SEARCH ({}) {} ATTRS {}'.format(search_base, search_filter, ', '.join(kwargs['attributes'])))
+        logger.debug('SEARCH ({}) {} {} ATTRS {}'.format(search_base, search_filter, search_scope,
+                                                      ', '.join(kwargs['attributes'])))
         super().search(
             search_base,
             search_filter,
@@ -95,6 +97,7 @@ class CachingConnection(ldap3.Connection):
         self.response = response
         logger.debug('RESULT '+str(self.result))
         self.cache[sha1] = self.response
+        print(self.response)
 
 private_addrs = (
     [2130706432, 4278190080], # 127.0.0.0,   255.0.0.0
@@ -472,8 +475,11 @@ def users_handler(args, conn, dc):
             if args.dn:
                 print(u['dn'])
             else:
-                #print(u['attributes']['userPrincipalName'][0].split('@')[0])
-                print(cn(u['dn']))
+                try:
+                    print(u['attributes']['userPrincipalName'][0].split('@')[0])
+                except:
+                    # NOTE: CN is not guaranteed to be unique
+                    print(cn(u['dn']))
 
 def groups_handler(args, conn, dc):
     for g in get_groups(conn, dc):
@@ -619,6 +625,13 @@ def gt_to_dt(g):
 def gt_to_str(g):
     return gt_to_dt(g).strftime('%m/%d/%Y %I:%M:%S %p')
 
+def get_search_base(conn):
+    conn.search('', '(objectClass=*)', get_operational_attributes=True, search_scope=ldap3.BASE, attributes=['altServer', 'namingContexts', 'supportedControl', 'supportedExtension', 'supportedFeatures', 'supportedCapabilities', 'supportedLdapVersion', 'supportedSASLMechanisms', 'vendorName', 'vendorVersion', 'subschemaSubentry', '*', '+'])
+    print('BASEDN')
+    print(conn.response)
+    return 0
+    return conn.response['attributes']['rootDomainNamingContext'][0]
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=DESCRIPTION, formatter_class=argparse.RawTextHelpFormatter)
     user_parser = parser.add_mutually_exclusive_group()
@@ -714,7 +727,7 @@ if __name__ == '__main__':
         else:
             args.domain, args.username = args.username.split('\\')
 
-    if not args.domain or args.domain.count('.') == 0:
+    if 0:# or not args.domain or args.domain.count('.') == 0:
         args.domain = None
         if not args.server:
             if args.name_server:
@@ -722,7 +735,7 @@ if __name__ == '__main__':
         else:
             args.domain = get_fqdn_by_addr(args.server, args.name_server or args.server)
         if not args.domain:
-            print('failed to get domain. try supply the fqdn with --domain')
+            print('failed to get domain. try supplying the fqdn with --domain')
             sys.exit()
         args.domain = args.domain.split('.', maxsplit=1)[-1]
         logger.info('Found domain: '+args.domain)
@@ -789,7 +802,7 @@ if __name__ == '__main__':
     if args.starttls:
         conn.start_tls()
     conn.bind()
-
+    print(get_search_base(conn))
     if args.info:
         print(server.info)
     if args.schema:
