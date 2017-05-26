@@ -151,6 +151,7 @@ def get_dc(domain, name_server=None):
     resolver = get_resolver(name_server)
     logger.debug('Resolving _ldap._tcp.'+domain)
     try:
+        # first, try a DNS service query
         answer = resolver.query('_ldap._tcp.'+domain, 'SRV')
         logger.debug('Answer '+str(answer[0].split()[-1]))
     except Exception:
@@ -158,16 +159,30 @@ def get_dc(domain, name_server=None):
     if not answer:
         logger.debug('Resolving '+domain)
         try:
+            # second, try standard lookup for the domain name
             answer = resolver.query(domain)
             logger.debug('Answer '+str(answer[0].split()[-1]))
         except Exception:
             pass
-    return get_addr_by_host(str(answer[0]).split()[-1], name_server)
+    if not answer:
+        # last, try using the default name lookup for your host (may include hosts file)
+        addr = get_host_by_name(domain)
+        if addr:
+            answer = [addr]
+    return get_addr_by_host(str(answer[0]).split()[-1], name_server) if len(answer) else None
+
+def get_host_by_name(host):
+    logger.debug('Resolving {} via default'.format(host))
+    try:
+        return socket.gethostbyname(host)
+    except:
+        pass
+    return None
 
 def get_addrs_by_host(host, name_server=None):
     ''' return list of addresses for the host '''
     resolver = get_resolver(name_server)
-    logger.debug('Resolving {} via {}'.format(host, name_server or 'default'))
+    logger.debug('Resolving {} via {}'.format(host, name_server or 'default DNS'))
     try:
         answer = resolver.query(host)
         logger.debug('Answer '+', '.join([a.address for a in answer]))
@@ -182,7 +197,7 @@ def get_addr_by_host(host, name_server=None):
 def get_fqdn_by_addr(addr, name_server=None):
     resolver = get_resolver(name_server)
     arpa = '.'.join(reversed(addr.split('.'))) + '.in-addr.arpa.'
-    logger.debug('Resolving '+arpa)
+    logger.debug('Resolving {} via {}'.format(arpa, name_server or 'default'))
     try:
         answer = resolver.query(arpa, 'PTR', 'IN')
     except Exception:
@@ -217,7 +232,9 @@ def get_groups(conn, dc):
 
 def get_computers(conn, dc, attributes=[]):
     attributes = list(set(attributes + ['name', 'dNSHostName', 'whenCreated', 'operatingSystem',
-                                        'operatingSystemServicePack', 'lastLogon', 'logonCount']))
+                                        'operatingSystemServicePack', 'lastLogon', 'logonCount',
+                                        'operatingSystemHotfix', 'operatingSystemVersion',
+                                        'location', 'managedBy', 'description']))
     conn.search(dc, '(objectCategory=computer)', attributes=attributes)
     return [g for g in conn.response if g.get('dn', None)]
 
@@ -232,9 +249,9 @@ def get_user_dn(conn, dc, user):
     return conn.response[0]['dn']
 
 def get_user_groups(conn, dc, user):
-    ''' get all groups for user, domain and local. see groupType attribute to check domain vs local '''
+    ''' get all groups for user, domain and local. see groupType attribute to check domain vs local.
+    user should be a dn'''
     base = dc
-    user = get_user_dn(conn, dc, user)
     conn.search(base, '(&(objectCategory=User)(distinguishedName='+user+'))', attributes=['memberOf', 'primaryGroupID'])
     group_dns = conn.response[0]['attributes']['memberOf']
 
@@ -292,7 +309,7 @@ def get_pwd_policy(conn, dc):
 
 def get_user_info(conn, dc, user):
     base = dc
-    user_dn = get_user_dn(conn, dc, args.user)
+    user_dn = get_user_dn(conn, dc, user)
     conn.search(base, '(&(objectCategory=user)(distinguishedName={}))'.format(user_dn), attributes=['allowedAttributes'])
     allowed = set([a.lower() for a in conn.response[0]['attributes']['allowedAttributes']])
     attributes = [
@@ -419,62 +436,63 @@ def timestr_or_never(t):
     return 'Never' if t in [0, 0x7FFFFFFFFFFFFFFF] else ft_to_str(t)
 
 def user_handler(args, conn, dc):
-    for u in get_user_info(conn, dc, args.user):
+    for u in [get_user_info(conn, dc, user)[0] for user in args.users]:
         if not u.get('attributes'):
             continue
         a = u['attributes']
         # https://msdn.microsoft.com/en-us/library/ms680832.aspx
-        print('User name                 ', a['name'][0])
-        print('Full Name                 ', get_attr(a, 'givenName', ''), get_attr(a, 'middleName', ''))
-        print('Distinguished Name        ', a['distinguishedName'][0])
-        print('UserPrincipalName         ', get_attr(a, 'userPrincipalName', ''))
-        print('Comment                   ', ','.join(a['description']))
-        print("User's comment            ", ','.join(a['info']))
-        print('Display name              ', ' '.join(a['displayName']))
-        print('E-mail                    ', ' '.join(a['mail']))
-        print('Job title                 ', ' '.join(a['title']))
-        print('Account created           ', gt_to_str(a['whenCreated'][0]))
-        print('Account active            ', 'No' if int(a['userAccountControl'][0]) & 0x2 else 'Yes')
+        print('UserName                 ', a['name'][0])
+        print('FullName                 ', get_attr(a, 'givenName', ''), get_attr(a, 'middleName', ''))
+        print('DistinguishedName        ', a['distinguishedName'][0])
+        print('UserPrincipalName        ', get_attr(a, 'userPrincipalName', ''))
+        print('Comment                  ', ','.join(a['description']))
+        print('UserComment              ', ','.join(a['info']))
+        print('DisplayName              ', ' '.join(a['displayName']))
+        print('E-mail                   ', ' '.join(a['mail']))
+        print('JobTitle                 ', ' '.join(a['title']))
+        print('AccountCreated           ', gt_to_str(a['whenCreated'][0]))
+        print('AccountActive            ', 'No' if int(a['userAccountControl'][0]) & 0x2 else 'Yes')
 
         try:
-            print('Account expires           ', timestr_or_never(int(a['accountExpires'][0])))
+            print('AccountExpires           ', timestr_or_never(int(a['accountExpires'][0])))
             if len(a['lockoutTime']) == 0 or int(a['lockoutTime'][0]) == 0:
-                print('Lockout time              ', 'No')
+                print('LockoutTime              ', 'No')
             else:
-                print('Lockout time              ', timestr_or_never(int(a['lockoutTime'])))
-            print('Account locked            ', 'Yes' if int(a['userAccountControl'][0]) & 0x10 else 'No')
-            print('Failed logins             ', a['badPwdCount'][0])
-            print('Last failed login         ', timestr_or_never(int(a['badPasswordTime'][0])))
-            print('Logon count               ', a['logonCount'][0])
-            print('Last logon                ', timestr_or_never(int(a['lastLogon'][0])))
+                print('LockoutTime              ', timestr_or_never(int(a['lockoutTime'])))
+            print('AccountLocked            ', 'Yes' if int(a['userAccountControl'][0]) & 0x10 else 'No')
+            print('FailedLogins             ', a['badPwdCount'][0])
+            print('LastFailedLogin          ', timestr_or_never(int(a['badPasswordTime'][0])))
+            print('LogonCount               ', a['logonCount'][0])
+            print('LastLogon                ', timestr_or_never(int(a['lastLogon'][0])))
         except:
             pass
-        print('')
 
         try:
-            print('Password last set         ', timestr_or_never(int(a['pwdLastSet'][0])))
-            print('Password expires          ', 'No' if int(a['userAccountControl'][0]) & 0x10000 else 'Yes')
-            print('Password changeable')
-            print('User may change password  ', 'No' if int(a['userAccountControl'][0]) & 0x40 else 'Yes')
-            print('')
-            print('Workstations allowed      ', ', '.join(a['userWorkstations']))
-            print('Logon script              ', ', '.join(a['scriptPath']))
+            print('PasswordLastSet          ', timestr_or_never(int(a['pwdLastSet'][0])))
+            print('PasswordExpires          ', 'No' if int(a['userAccountControl'][0]) & 0x10000 else 'Yes')
+            #print('PasswordChangeable')
+            print('UserMayChangePassword    ', 'No' if int(a['userAccountControl'][0]) & 0x40 else 'Yes')
+            #print('Workstations allowed      ', ', '.join(a['userWorkstations']))
         except:
             pass
 
-        groups = get_user_groups(conn, dc, args.user)
+        groups = get_user_groups(conn, dc, u['dn'])
         primary_group = [g['dn'] for g in groups if struct.unpack('<H', g['attributes']['objectSid'][0][-4:-2])[0] == int(a['primaryGroupID'][0])][0]
-        print('PrimaryGroup               "{}"'.format(primary_group if args.dn else cn(primary_group)))
+        print('PrimaryGroup              "{}"'.format(primary_group if args.dn else cn(primary_group)))
+        # group scopes: https://technet.microsoft.com/en-us/library/cc755692.aspx
         GROUP_SYSTEM = 0x1
         GROUP_GLOBAL = 0x2
         GROUP_DOMAIN_LOCAL = 0x4
         GROUP_UNIVERSAL = 0x8
         XGROUP_LOCAL = GROUP_SYSTEM | GROUP_DOMAIN_LOCAL
         XGROUP_GLOBAL = GROUP_GLOBAL | GROUP_UNIVERSAL
+        for g in groups:
+            logger.debug(hex(dw(int(g['attributes']['groupType'][0]))) + ' ' + cn(g['dn']))
         local_groups = [g['dn'] for g in groups if dw(int(g['attributes']['groupType'][0])) & XGROUP_LOCAL]
         global_groups = [g['dn'] for g in groups if dw(int(g['attributes']['groupType'][0])) & XGROUP_GLOBAL]
-        print('Local Group Memberships   ', ', '.join(map(lambda x:'"{}"'.format(x if args.dn else cn(x)), local_groups)))
-        print('Global Group memberships  ', ', '.join(map(lambda x:'"{}"'.format(x if args.dn else cn(x)), global_groups)))
+        print('LocalGroupMemberships    ', ', '.join(map(lambda x:'"{}"'.format(x if args.dn else cn(x)), local_groups)))
+        print('GlobalGroupMemberships   ', ', '.join(map(lambda x:'"{}"'.format(x if args.dn else cn(x)), global_groups)))
+        print('')
 
 def users_handler(args, conn, dc):
     users = get_users(conn, dc)
@@ -508,9 +526,6 @@ def group_handler(args, conn, dc):
                 print(cn(u['dn']))
 
 def computers_handler(args, conn, dc):
-    '''     attributes = ['name', 'dNSHostName', 'whenCreated', 'operatingSystem', 'operatingSystemServicePack',
-                  'lastLogon', 'logonCount']
-    '''
     computers = get_computers(conn, dc, args.attributes)
     for c in computers:
         info = ''
@@ -521,15 +536,17 @@ def computers_handler(args, conn, dc):
                 info += '{}: {}\n'.format(a, get_attr(c, a, '', lambda x:ft_to_str(int(x))))
             else:
                 info += '{}: {}\n'.format(a, get_attr(c, a, ''))
-        hostname = cn(c['dn']) + '.' + args.domain
+        hostname = c['attributes']['dNSHostName'][0]
         if args.resolve:
-            addr = get_addr_by_host(hostname, args.name_server) or get_addr_by_host(hostname, args.server)
+            addr = get_addr_by_host(hostname, args.name_server) or \
+                   get_addr_by_host(hostname, args.server) or \
+                   get_host_by_name(hostname)
             if addr:
-                hostname += ' ({})'.format(addr)
+                info = 'Address: {}\n'.format(addr) + info
         if args.dn:
-            print(c.get('dn', c), info, sep=os.linesep)
+            print('dn: '+c.get('dn', c), info, sep=os.linesep)
         else:
-            print(cn(c['dn']), info, sep=os.linesep)
+            print('cn: '+cn(c['dn']), info, sep=os.linesep)
 
 def policy_handler(args, conn, dc):
     pol = get_default_pwd_policy(args, conn, dc)
@@ -680,7 +697,7 @@ if __name__ == '__main__':
     users_parser.set_defaults(handler=users_handler)
     user_parser = subparsers.add_parser('user', help='get user info')
     user_parser.set_defaults(handler=user_handler)
-    user_parser.add_argument('user', help='user to search')
+    user_parser.add_argument('users', nargs='+', help='users to search')
 
     groups_parser = subparsers.add_parser('groups', help='list all groups')
     groups_parser.set_defaults(handler=groups_handler)
@@ -729,7 +746,7 @@ if __name__ == '__main__':
 
     if args.server and not is_addr(args.server):
         # resolve DC hostname
-        args.server = get_addr_by_host(args.server, args.name_server)
+        args.server = get_addr_by_host(args.server, args.name_server) or get_host_by_name(args.server)
         if not args.server:
             print('Failed to resolve DC hostname')
             sys.exit()
