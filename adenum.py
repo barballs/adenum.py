@@ -3,6 +3,7 @@ import os
 import struct
 import argparse
 import socket
+import binascii
 import configparser
 import logging
 import hashlib
@@ -14,7 +15,8 @@ import datetime
 import tempfile
 # non-std
 import ldap3
-# NOTE: dnspython and pysmb are imported on demand
+import dns.resolver
+# NOTE: pysmb is imported on demand
 
 DESCRIPTION = 'Enumerate ActiveDirectory users, groups, computers, and password policies'
 
@@ -97,8 +99,7 @@ class CachingConnection(ldap3.Connection):
         self.response = response
         logger.debug('RESULT '+str(self.result))
         self.cache[sha1] = self.response
-        print(self.response)
-
+        
 private_addrs = (
     [2130706432, 4278190080], # 127.0.0.0,   255.0.0.0
     [3232235520, 4294901760], # 192.168.0.0, 255.255.0.0
@@ -137,7 +138,6 @@ def get_attr(o, attr, default=None, trans=None):
     return v
 
 def get_resolver(name_server=None):
-    import dns.resolver
     if name_server:
         resolver = dns.resolver.Resolver()
         resolver.nameservers = [name_server]
@@ -167,7 +167,7 @@ def get_dc(domain, name_server=None):
 def get_addrs_by_host(host, name_server=None):
     ''' return list of addresses for the host '''
     resolver = get_resolver(name_server)
-    logger.debug('Resolving {} via {}'.format(host, name_server or 'system'))
+    logger.debug('Resolving {} via {}'.format(host, name_server or 'default'))
     try:
         answer = resolver.query(host)
         logger.debug('Answer '+', '.join([a.address for a in answer]))
@@ -272,19 +272,23 @@ def get_pwd_policy(conn, dc):
         'name',
         'msDS-PasswordReversibleEncryptionEnabled', # default is false which is good
         'msDS-PasswordHistoryLength',               # how many old pwds to remember
-        'msds-PasswordComplexityEnabled',           # require character groups
+        'msds-PasswordComplexityEnabled',           # require different character groups
         'msDS-MinimumPasswordLength',
         'msDS-MinimumPasswordAge', # used to prevent abuse of msDS-PasswordHistoryLength
         'msDS-MaximumPasswordAge', # how long until password expires
-        'msDS-LockoutThreshold',
-        'msDS-LockoutObservationWindow',
-        'msDS-LockoutDuration',
+        'msDS-LockoutThreshold',   # login failures allowed within the window
+        'msDS-LockoutObservationWindow', # time window where failed auths are counted
+        'msDS-LockoutDuration', # how long to lock user account after too many failed auths
         'msDS-PSOAppliesTo',    # dn's of affected users
         'msDS-PasswordSettingsPrecedence', # used to assign precedence when a user is member of multiple policies
     ]
     # grab all objects directly under the search base
     conn.search(base, '(objectCategory=*)', attributes=attrs, search_scope=ldap3.LEVEL)
-    return conn.response
+    response = []
+    for r in conn.response:
+        if not r['dn'].lower().startswith('cn=password settings container,'):
+            response.append(r)
+    return response
 
 def get_user_info(conn, dc, user):
     base = dc
@@ -338,12 +342,13 @@ def get_user_info(conn, dc, user):
     conn.search(base, '(&(objectCategory=user)(distinguishedName={}))'.format(user_dn), attributes=attrs)
     return conn.response
 
-
-def MyMD4():
-    return MyMD4Class()
 class MyMD4Class():
+    ''' class to add pass-the-hash support to pysmb '''
+    @staticmethod
+    def new():
+        return MyMD4Class()
     def update(self, p):
-        self.nthash = p.decode('utf-16-le').encode()
+        self.nthash = binascii.unhexlify(p.decode('utf-16-le'))
     def digest(self):
         return self.nthash
 
@@ -366,8 +371,10 @@ def get_default_pwd_policy(args, conn, dc):
             from smb.SMBConnection import SMBConnection
             if args.nthash:
                 import smb.ntlm
-                smb.ntlm.MD4 = MyMD4
-            dc_hostname = args.hostname or get_host_by_addr(args.server, args.server) or get_host_by_addr(args.server)
+                smb.ntlm.MD4 = MyMD4Class.new
+            dc_hostname = args.hostname or \
+                          get_host_by_addr(args.server, args.name_server) or \
+                          get_host_by_addr(args.server, args.server)
             if not dc_hostname:
                 raise socket.herror
             logger.debug('dc_hostname: '+dc_hostname)
@@ -380,6 +387,7 @@ def get_default_pwd_policy(args, conn, dc):
             use_pysmb = False
     else:
         use_pysmb = False
+
     if use_pysmb:
         logger.debug('SMBConnection("{}", "{}", "adenum", "{}", domain="{}")'.format(
             args.username, args.password, dc_hostname, args.domain))
@@ -535,9 +543,9 @@ def policy_handler(args, conn, dc):
             if a in pol:
                 print('{:30s} {}'.format(a, pol[a]))
         print('')
-    pols = get_pwd_policy(conn, dc)
-    # sort policies by precedence
-    pols = sorted(pols, key=lambda p:int(p['attributes']['msDS-PasswordSettingsPrecedence'][0]))
+    # sort policies by precedence. precedence is used to determine which policy applies to a user
+    # whem multiple policies are applied to him/her
+    pols = sorted(get_pwd_policy(conn, dc), key=lambda p:int(p['attributes']['msDS-PasswordSettingsPrecedence'][0]))
     for a in [p['attributes'] for p in pols]:
         print('--------', a['name'][0], '--------')
         print('MinimumPasswordLength          ', a['msDS-MinimumPasswordLength'][0])
@@ -625,12 +633,17 @@ def gt_to_dt(g):
 def gt_to_str(g):
     return gt_to_dt(g).strftime('%m/%d/%Y %I:%M:%S %p')
 
-def get_search_base(conn):
-    conn.search('', '(objectClass=*)', get_operational_attributes=True, search_scope=ldap3.BASE, attributes=['altServer', 'namingContexts', 'supportedControl', 'supportedExtension', 'supportedFeatures', 'supportedCapabilities', 'supportedLdapVersion', 'supportedSASLMechanisms', 'vendorName', 'vendorVersion', 'subschemaSubentry', '*', '+'])
-    print('BASEDN')
-    print(conn.response)
-    return 0
-    return conn.response['attributes']['rootDomainNamingContext'][0]
+# def get_search_base(conn):
+#     attributes=['altServer', 'namingContexts', 'supportedControl', 'supportedExtension', 'supportedFeatures',
+#                 'supportedCapabilities', 'supportedLdapVersion', 'supportedSASLMechanisms', 'vendorName',
+#                 'vendorVersion', 'subschemaSubentry', '*', '+']
+#     attributes = ['vendorName', 'range=0-1']
+#     conn.search('', '(objectClass=*)', get_operational_attributes=True, search_scope=ldap3.BASE,
+#                 attributes=attributes)
+#     print('BASEDN')
+#     print(conn.response)
+#     return 0
+#     return conn.response['attributes']['rootDomainNamingContext'][0]
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=DESCRIPTION, formatter_class=argparse.RawTextHelpFormatter)
@@ -643,7 +656,7 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--server', help='domain controller addr or name. default: dns lookup on domain')
     parser.add_argument('-H', '--hostname', help='DC hostname. never required')
     parser.add_argument('-d', '--domain', help='default is to use domain of server')
-    parser.add_argument('--port', type=int, help='default 389 or 636 with --tls')
+    parser.add_argument('--port', type=int, help='default 389 or 636 with --tls. 3268 for global catalog')
     parser.add_argument('--smb-port', dest='smb_port', default=445, type=int, help='default 445')
     parser.add_argument('--smbclient', action='store_true', help='force use of smbclient over pysmb')
     parser.add_argument('--verbose', action='store_true')
@@ -727,13 +740,17 @@ if __name__ == '__main__':
         else:
             args.domain, args.username = args.username.split('\\')
 
-    if 0:# or not args.domain or args.domain.count('.') == 0:
+    if not args.domain or args.domain.count('.') == 0:
+        logger.debug('checking for domain name')
         args.domain = None
         if not args.server:
             if args.name_server:
                 args.domain = get_fqdn_by_addr(args.name_server, args.name_server)
         else:
-            args.domain = get_fqdn_by_addr(args.server, args.name_server or args.server)
+            args.domain = get_fqdn_by_addr(args.server, args.name_server)
+            if not args.domain and args.server != args.name_server:
+                # try query against the domain controller
+                args.domain = get_fqdn_by_addr(args.server, args.server)
         if not args.domain:
             print('failed to get domain. try supplying the fqdn with --domain')
             sys.exit()
@@ -802,7 +819,7 @@ if __name__ == '__main__':
     if args.starttls:
         conn.start_tls()
     conn.bind()
-    print(get_search_base(conn))
+
     if args.info:
         print(server.info)
     if args.schema:
