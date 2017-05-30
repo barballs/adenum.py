@@ -216,8 +216,7 @@ def dw(d):
 
 def get_users(conn, dc):
     ''' get all domain users '''
-    base = dc
-    conn.search(base, '(objectCategory=user)', attributes=['userPrincipalName'])
+    conn.search(dc, '(objectCategory=user)', attributes=['userPrincipalName'])
     return conn.response
 
 def get_groups(conn, dc):
@@ -226,16 +225,23 @@ def get_groups(conn, dc):
     # alternatively, you can do 2 queries with bases:
     #    cn=users,cn=mydomain,cn=com
     #    cn=users,cn=builtins,cn=mydomain,cn=com
-    base = dc
-    conn.search(base, '(objectCategory=group)', attributes=['objectSid', 'groupType'])
+    conn.search(dc, '(objectCategory=group)', attributes=['objectSid', 'groupType'])
     return [g for g in conn.response if g.get('dn', None)]
 
-def get_computers(conn, dc, attributes=[]):
+def get_computers(conn, dc, attributes=[], hostnames=[]):
     attributes = list(set(attributes + ['name', 'dNSHostName', 'whenCreated', 'operatingSystem',
                                         'operatingSystemServicePack', 'lastLogon', 'logonCount',
                                         'operatingSystemHotfix', 'operatingSystemVersion',
                                         'location', 'managedBy', 'description']))
-    conn.search(dc, '(objectCategory=computer)', attributes=attributes)
+    if len(hostnames):
+        hosts = ''
+        for h in hostnames:
+            hosts += '(cn={})'.format(h)
+        if len(hostnames) > 1:
+            hosts = '(|' + hosts + ')'
+        conn.search(dc, '(&(objectCategory=computer){})'.format(hosts), attributes=attributes)
+    else:
+        conn.search(dc, '(objectCategory=computer)', attributes=attributes)
     return [g for g in conn.response if g.get('dn', None)]
 
 def gid_from_sid(sid):
@@ -244,15 +250,13 @@ def gid_from_sid(sid):
     return struct.unpack('<H', sid[-4:-2])[0]
 
 def get_user_dn(conn, dc, user):
-    base = dc
-    conn.search(base, '(&(objectCategory=user)(|(userPrincipalName={}@*)(cn={})))'.format(user, user))
+    conn.search(dc, '(&(objectCategory=user)(|(userPrincipalName={}@*)(cn={})))'.format(user, user))
     return conn.response[0]['dn']
 
 def get_user_groups(conn, dc, user):
     ''' get all groups for user, domain and local. see groupType attribute to check domain vs local.
     user should be a dn'''
-    base = dc
-    conn.search(base, '(&(objectCategory=User)(distinguishedName='+user+'))', attributes=['memberOf', 'primaryGroupID'])
+    conn.search(dc, '(&(objectCategory=User)(distinguishedName='+user+'))', attributes=['memberOf', 'primaryGroupID'])
     group_dns = conn.response[0]['attributes']['memberOf']
 
     # get primary group which is not included in the memberOf attribute
@@ -308,9 +312,8 @@ def get_pwd_policy(conn, dc):
     return response
 
 def get_user_info(conn, dc, user):
-    base = dc
     user_dn = get_user_dn(conn, dc, user)
-    conn.search(base, '(&(objectCategory=user)(distinguishedName={}))'.format(user_dn), attributes=['allowedAttributes'])
+    conn.search(dc, '(&(objectCategory=user)(distinguishedName={}))'.format(user_dn), attributes=['allowedAttributes'])
     allowed = set([a.lower() for a in conn.response[0]['attributes']['allowedAttributes']])
     attributes = [
         #'msexchhomeservername',
@@ -356,7 +359,7 @@ def get_user_info(conn, dc, user):
         'useraccountcontrol',
     ]
     attrs = [a for a in attributes if a.lower() in allowed]
-    conn.search(base, '(&(objectCategory=user)(distinguishedName={}))'.format(user_dn), attributes=attrs)
+    conn.search(dc, '(&(objectCategory=user)(distinguishedName={}))'.format(user_dn), attributes=attrs)
     return conn.response
 
 class MyMD4Class():
@@ -526,7 +529,7 @@ def group_handler(args, conn, dc):
                 print(cn(u['dn']))
 
 def computers_handler(args, conn, dc):
-    computers = get_computers(conn, dc, args.attributes)
+    computers = get_computers(conn, dc, args.attributes, args.computers)
     for c in computers:
         info = ''
         for a in sorted(c['attributes'].keys()):
@@ -535,7 +538,7 @@ def computers_handler(args, conn, dc):
             elif a.lower() in ['lastlogon']:
                 info += '{}: {}\n'.format(a, get_attr(c, a, '', lambda x:ft_to_str(int(x))))
             else:
-                info += '{}: {}\n'.format(a, get_attr(c, a, ''))
+                info += '{}: {}\n'.format(a, ', '.join(c['attributes'][a]))
         hostname = c['attributes']['dNSHostName'][0]
         if args.resolve:
             addr = get_addr_by_host(hostname, args.name_server) or \
@@ -709,10 +712,17 @@ if __name__ == '__main__':
     policy_parser = subparsers.add_parser('policy', help='get policy info')
     policy_parser.set_defaults(handler=policy_handler)
 
+    computer_parser = subparsers.add_parser('computer', help='list computer')
+    computer_parser.set_defaults(handler=computers_handler)
+    computer_parser.add_argument('-r', '--resolve', action='store_true', help='resolve hostnames')
+    computer_parser.add_argument('-a', '--attributes', default=[], type=lambda x:x.split(','), help='additional attributes to retrieve')
+    computer_parser.add_argument('computers', nargs='+', help='computers to search')
+
     computers_parser = subparsers.add_parser('computers', help='list computers')
     computers_parser.set_defaults(handler=computers_handler)
+    computers_parser.set_defaults(computers=[])
     computers_parser.add_argument('-r', '--resolve', action='store_true', help='resolve hostnames')
-    computers_parser.add_argument('attributes', nargs='*', help='additional attributes to retrieve')
+    computers_parser.add_argument('-a', '--attributes', default=[], type=lambda x:x.split(','), help='additional attributes to retrieve')
 
     query_parser = subparsers.add_parser('query', help='perform custom ldap query')
     query_parser.set_defaults(handler=query_handler)
