@@ -63,6 +63,29 @@ https://msdn.microsoft.com/en-us/library/ms680832.aspx
 
 logger = logging.getLogger(__name__)
 
+def get_uptime(addr):
+    ''' Return uptime string for SMB2 hosts. Sends a SMB1 NegotiateProtocolRequest
+    to elicit an SMB2 NegotiateProtocolRequest. Works even if SMB1 is disabled on
+    the remote host. '''
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.5)
+    try:
+        s.connect((addr, 445))
+    except Exception:
+        return None
+    s.send(binascii.unhexlify(
+        b'00000039ff534d4272000000001843c80000000000000000000000000000f'
+        b'eff0000000000160002534d4220322e3030320002534d4220322e3f3f3f00'
+    ))
+    data = s.recv(4096)
+    s.shutdown(socket.SHUT_RDWR)
+    if data[4] != 0xfe:
+        return None
+    logger.debug('Dialect '+hex(struct.unpack('<H', data[0x48:0x4a])[0]))
+    boottime = datetime.datetime.fromtimestamp((struct.unpack('<Q', data[0x74:0x7c])[0] / 10000000) - 11644473600)
+    return str(datetime.datetime.now() - boottime) + ' (booted '+boottime.strftime('%H:%M:%S %d %b %Y')+')'
+
+
 class CachingConnection(ldap3.Connection):
     ''' Subclass of ldap3.Connection which uses the range attribute
     to gather all results. It will also cache searches. '''
@@ -540,12 +563,17 @@ def computers_handler(args, conn, dc):
             else:
                 info += '{}: {}\n'.format(a, ', '.join(c['attributes'][a]))
         hostname = c['attributes']['dNSHostName'][0]
-        if args.resolve:
+        if args.resolve or args.uptime:
             addr = get_addr_by_host(hostname, args.name_server) or \
                    get_addr_by_host(hostname, args.server) or \
                    get_host_by_name(hostname)
             if addr:
                 info = 'Address: {}\n'.format(addr) + info
+                if args.uptime:
+                    uptime = get_uptime(addr)
+                    if uptime:
+                        datetime.datetime.now()
+                        info += 'uptime: {}\n'.format(uptime)
         if args.dn:
             print('dn: '+c.get('dn', c), info, sep=os.linesep)
         else:
@@ -714,6 +742,7 @@ if __name__ == '__main__':
 
     computer_parser = subparsers.add_parser('computer', help='list computer')
     computer_parser.set_defaults(handler=computers_handler)
+    computer_parser.add_argument('-u', '--uptime', action='store_true', help='get uptime via SMB2')
     computer_parser.add_argument('-r', '--resolve', action='store_true', help='resolve hostnames')
     computer_parser.add_argument('-a', '--attributes', default=[], type=lambda x:x.split(','), help='additional attributes to retrieve')
     computer_parser.add_argument('computers', nargs='+', help='computers to search')
@@ -721,6 +750,7 @@ if __name__ == '__main__':
     computers_parser = subparsers.add_parser('computers', help='list computers')
     computers_parser.set_defaults(handler=computers_handler)
     computers_parser.set_defaults(computers=[])
+    computers_parser.add_argument('-u', '--uptime', action='store_true', help='get uptime via SMB2')
     computers_parser.add_argument('-r', '--resolve', action='store_true', help='resolve hostnames')
     computers_parser.add_argument('-a', '--attributes', default=[], type=lambda x:x.split(','), help='additional attributes to retrieve')
 
