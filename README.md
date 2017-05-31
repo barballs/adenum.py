@@ -8,17 +8,17 @@ You'll need to install ldap3, dnspython, and pysmb:
 pip3 install ldap3 dnspython pysmb
 ```
 
-To read the default password policy from the sysvol file share, you'll need either smbclient or pysmb.
-
+To read the default password policy from the SYSVOL share, you'll need either smbclient or pysmb.
 
 ## Examples
-NOTE: when specifying a domain with -d, ensure that your system
-is configured to use the DNS server for the domain. Alternatively,
-you can specify your domain controller with -s if it is a name server.
-You may also specify a name server with --name-server.
+NOTE: If your system is not configured to use the name server for
+the domain, you must specify the domain controller with -s or the
+domain's name server with --name-server. In nearly all AD domains,
+the domain controller acts as the name server. Domains specified
+with -d must be fully qualified.
 
 ### List password policies
-The default password policy should be readable by all users. Additional policies may require admin.
+Non-default policies may require higher privileges.
 ```
 $ python3 adenum.py -u USER -P -d mydomain.local policy
 ```
@@ -33,3 +33,13 @@ $ python3 adenum.py -u USER -P -d mydomain.local groups
 ```
 $ python3 adenum.py -u USER -P -d mydomain.local group "domain admins"
 ```
+
+### List domain joined computers.
+Add -r and -u to resolve hostnames and get uptime (SMB2 only).
+```
+$ python3 adenum.py -u USER -P -d mydomain.local computers
+```
+
+### RESOURCES =
+all defined AD attributes
+ https://msdn.microsoft.com/en-us/library/ms675090(v=vs.85).aspx

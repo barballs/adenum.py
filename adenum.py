@@ -33,16 +33,17 @@ You'll need to install ldap3 and dnspython:
     pip3 install ldap3 dnspython
 
 You will also need either smbclient or pysmb to read the default password policy
-from the sysvol file share.
+from the SYSVOL share.
 
 = EXAMPLES =
 
-NOTE: when specifying a domain with -d, ensure that your system
-is configured to use the DNS server for the domain. Alternatively,
-you can specify your domain controller with -s if it is a name server.
-You may also specify a name server with --name-server.
+NOTE: If your system is not configured to use the name server for
+the domain, you must specify the domain controller with -s or the
+domain's name server with --name-server. In nearly all AD domains,
+the domain controller acts as the name server. Domains specified
+with -d must be fully qualified.
 
-List password policies
+List password policies. Non-default policies may require higher privileges.
     python3 adenum.py -u USER -P -d mydomain.local policy
 
 List all users and groups
@@ -52,19 +53,19 @@ List all users and groups
 List domain admins
     python3 adenum.py -u USER -P -d mydomain.local group "domain admins"
 
+List domain joined computers. Add -r and -u to resolve hostnames and get uptime (SMB2 only).
+    python3 adenum.py -u USER -P -d mydomain.local computers
+
 = RESOURCES =
 
 all defined AD attributes
 https://msdn.microsoft.com/en-us/library/ms675090(v=vs.85).aspx
-
-user account
-https://msdn.microsoft.com/en-us/library/ms680832.aspx
 '''
 
 logger = logging.getLogger(__name__)
 
 def get_uptime(addr):
-    ''' Return uptime string for SMB2 hosts. Sends a SMB1 NegotiateProtocolRequest
+    ''' Return uptime string for SMB2+ hosts. Sends a SMB1 NegotiateProtocolRequest
     to elicit an SMB2 NegotiateProtocolRequest. Works even if SMB1 is disabled on
     the remote host. '''
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -178,7 +179,7 @@ def get_dc(domain, name_server=None):
         answer = resolver.query('_ldap._tcp.'+domain, 'SRV')
         logger.debug('Answer '+str(answer[0].split()[-1]))
     except Exception:
-        pass
+        answer = None
     if not answer:
         logger.debug('Resolving '+domain)
         try:
@@ -192,7 +193,7 @@ def get_dc(domain, name_server=None):
         addr = get_host_by_name(domain)
         if addr:
             answer = [addr]
-    return get_addr_by_host(str(answer[0]).split()[-1], name_server) if len(answer) else None
+    return get_addr_by_host(str(answer[0]).split()[-1], name_server) if answer and len(answer) else None
 
 def get_host_by_name(host):
     logger.debug('Resolving {} via default'.format(host))
@@ -572,7 +573,6 @@ def computers_handler(args, conn, dc):
                 if args.uptime:
                     uptime = get_uptime(addr)
                     if uptime:
-                        datetime.datetime.now()
                         info += 'uptime: {}\n'.format(uptime)
         if args.dn:
             print('dn: '+c.get('dn', c), info, sep=os.linesep)
@@ -648,7 +648,6 @@ def query_handler(args, conn, dc):
 
 def modify_handler(args, conn, dc):
     # 'MODIFY_ADD', 'MODIFY_DELETE', 'MODIFY_INCREMENT', 'MODIFY_REPLACE'
-    #args.distinguished_name
     raise NotImplementedError
     action_map = {'add':ldap3.MODIFY_ADD, 'del':ldap3.MODIFY_DELETE, 'inc':ldap3.MODIFY_INCREMENT, 'replace':ldap3.MODIFY_REPLACE}
     conn.modify(dn, {args.attribute:[(ldap3.MODIFY_REPLACE, args.values)]})
@@ -680,18 +679,6 @@ def gt_to_dt(g):
 
 def gt_to_str(g):
     return gt_to_dt(g).strftime('%m/%d/%Y %I:%M:%S %p')
-
-# def get_search_base(conn):
-#     attributes=['altServer', 'namingContexts', 'supportedControl', 'supportedExtension', 'supportedFeatures',
-#                 'supportedCapabilities', 'supportedLdapVersion', 'supportedSASLMechanisms', 'vendorName',
-#                 'vendorVersion', 'subschemaSubentry', '*', '+']
-#     attributes = ['vendorName', 'range=0-1']
-#     conn.search('', '(objectClass=*)', get_operational_attributes=True, search_scope=ldap3.BASE,
-#                 attributes=attributes)
-#     print('BASEDN')
-#     print(conn.response)
-#     return 0
-#     return conn.response['attributes']['rootDomainNamingContext'][0]
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=DESCRIPTION, formatter_class=argparse.RawTextHelpFormatter)
@@ -788,7 +775,7 @@ if __name__ == '__main__':
         # resolve DC hostname
         args.server = get_addr_by_host(args.server, args.name_server) or get_host_by_name(args.server)
         if not args.server:
-            print('Failed to resolve DC hostname')
+            print('Error: Failed to resolve DC hostname')
             sys.exit()
 
     if args.username.find('\\') != -1:
@@ -809,7 +796,7 @@ if __name__ == '__main__':
                 # try query against the domain controller
                 args.domain = get_fqdn_by_addr(args.server, args.server)
         if not args.domain:
-            print('failed to get domain. try supplying the fqdn with --domain')
+            print('Error: Failed to get domain. Try supplying the fqdn with --domain')
             sys.exit()
         args.domain = args.domain.split('.', maxsplit=1)[-1]
         logger.info('Found domain: '+args.domain)
@@ -827,7 +814,8 @@ if __name__ == '__main__':
         #addrs = get_addrs_by_host(args.domain, args.name_server)
         args.server = get_dc(args.domain, args.name_server)
         if not args.server:
-            print('Failed to find a domain controller')
+            print('Error: Failed to find a domain controller')
+            sys.exit()
         logger.info('Found a domain controller for {} at {}'.format(args.domain, args.server))
 
     dc = 'dc='+args.domain.replace('.', ',dc=')
