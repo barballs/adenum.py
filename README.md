@@ -40,6 +40,8 @@ Add -r and -u to resolve hostnames and get uptime (SMB2 only).
 $ python3 adenum.py -u USER -P -d mydomain.local computers
 ```
 
-### RESOURCES =
+### Resources
 all defined AD attributes
- https://msdn.microsoft.com/en-us/library/ms675090(v=vs.85).aspx
+```
+https://msdn.microsoft.com/en-us/library/ms675090(v=vs.85).aspx
+```
