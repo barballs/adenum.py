@@ -13,6 +13,7 @@ import getpass
 import hashlib
 import datetime
 import tempfile
+import concurrent.futures
 # non-std
 import ldap3
 import dns.resolver
@@ -64,6 +65,105 @@ https://msdn.microsoft.com/en-us/library/ms675090(v=vs.85).aspx
 
 logger = logging.getLogger(__name__)
 
+def get_smb_info(addr):
+    info = {'smbVersions':set()}
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.5)
+    try:
+        s.connect((addr, 445))
+    except Exception:
+        return None
+
+    # send SMB1 NegotiateProtocolRequest with SMB2 dialects
+    s.send(binascii.unhexlify(
+        b'000000d4ff534d4272000000001843c80000000000000000000000000000'
+        b'feff0000000000b100025043204e4554574f524b2050524f4752414d2031'
+        b'2e3000024d4943524f534f4654204e4554574f524b5320312e303300024d'
+        b'4943524f534f4654204e4554574f524b5320332e3000024c414e4d414e31'
+        b'2e3000024c4d312e32583030320002444f53204c414e4d414e322e310002'
+        b'4c414e4d414e322e31000253616d626100024e54204c414e4d414e20312e'
+        b'3000024e54204c4d20302e31320002534d4220322e3030320002534d4220'
+        b'322e3f3f3f00'
+    ))
+    try:
+        data = s.recv(4096)
+    except ConnectionResetError:
+        return None
+
+    if data[4] == 0xff:
+        dialects = ['PC NETWORK PROGRAM 1.0', 'MICROSOFT NETWORKS 1.03', 'MICROSOFT NETWORKS 3.0',
+                    'LANMAN1.0', 'LM1.2X002', 'DOS LANMAN2.1', 'LANMAN2.1', 'Samba', 'NT LANMAN 1.0',
+                    'NT LM 0.12']
+        info['smbDialect'] = dialects[struct.unpack('<H', data[37:39])[0]]
+        info['smbVersion'] = 1
+    else:
+        dialect = struct.unpack('<H', data[0x48:0x4a])[0]
+        boottime = datetime.datetime.fromtimestamp((struct.unpack('<Q', data[0x74:0x7c])[0] / 10000000) - 11644473600)
+        info['smbVersions'].add(2)
+        info['uptime'] = str(datetime.datetime.now() - boottime) + ' (booted '+ \
+                           boottime.strftime('%H:%M:%S %d %b %Y')+')'
+        if dialect == 0x2ff:
+            # send SMB2 NegotiateProtocolRequest with random client GUID and salt
+            s.send(binascii.unhexlify(
+                b'000000b6fe534d4240000000000000000000000000000000000000000100'
+                b'000000000000000000000000000000000000000000000000000000000000'
+                b'000000000000000024000800010000007f000000') + \
+                os.urandom(16) + \
+                binascii.unhexlify(
+                    b'780000000200000002021002220224020003020310031103'
+                    b'000000000100260000000000010020000100') + \
+                os.urandom(32) + \
+                binascii.unhexlify(b'00000200060000000000020001000200')
+            )
+            data = s.recv(4096)
+            dialect = struct.unpack('<H', data[0x48:0x4a])[0]
+        s.shutdown(socket.SHUT_RDWR)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)        
+        s.connect((addr, 445))
+        # send SMB1 NegotiateProtocolRequest with SMB1 dialects only
+        s.send(binascii.unhexlify(
+            b'000000beff534d4272000000001843c80000000000000000000000000000'
+            b'feff00000000009b00025043204e4554574f524b2050524f4752414d2031'
+            b'2e3000024d4943524f534f4654204e4554574f524b5320312e303300024d'
+            b'4943524f534f4654204e4554574f524b5320332e3000024c414e4d414e31'
+            b'2e3000024c4d312e32583030320002444f53204c414e4d414e322e310002'
+            b'4c414e4d414e322e31000253616d626100024e54204c414e4d414e20312e'
+            b'3000024e54204c4d20302e313200'
+        ))
+        info['smbDialect'] = hex(dialect)
+        info['smbVersion'] = dialect >> 8
+        if dialect > 3:
+            info['smbVersions'].add(3)
+        logger.debug('MaxSMBVersion: '+hex(dialect))
+        try:
+            s.recv(4096)
+        except ConnectionResetError:
+            return info
+
+    # SMB1 SessionSetup with random PID
+    s.send(
+        binascii.unhexlify(
+            b'0000009cff534d4273000000001843c800004253525350594c200000ffff') + \
+        os.urandom(2) + \
+        binascii.unhexlify(
+            b'000001000cff000000ffff02000100000000004a000000000054c000'
+            b'806100604806062b0601050502a03e303ca00e300c060a2b060104018237'
+            b'02020aa22a04284e544c4d53535000010000001582086200000000280000'
+            b'000000000028000000060100000000000f0055006e006900780000005300'
+            b'61006d00620061000000')
+    )
+    data = s.recv(4096)
+    size = struct.unpack('<H', data[43:45])[0]
+    native_os, native_lm = data[47+size:].split(b'\x00\x00\x00', maxsplit=1)
+    native_os += b'\x00'
+    native_lm = native_lm[:-2]
+    info['native_os'] = native_os.decode('utf-16-le')
+    info['native_lm'] = native_lm.decode('utf-16-le')
+    info['smbVersions'].add(1)
+    s.shutdown(socket.SHUT_RDWR)
+    info['smbVersions'] = ', '.join(map(str, info['smbVersions']))
+    return info
+
 def get_uptime(addr):
     ''' Return uptime string for SMB2+ hosts. Sends a SMB1 NegotiateProtocolRequest
     to elicit an SMB2 NegotiateProtocolRequest. Works even if SMB1 is disabled on
@@ -78,11 +178,11 @@ def get_uptime(addr):
         b'00000039ff534d4272000000001843c80000000000000000000000000000f'
         b'eff0000000000160002534d4220322e3030320002534d4220322e3f3f3f00'
     ))
-    data = s.recv(4096)
+    data = s.recv(0x7d)
     s.shutdown(socket.SHUT_RDWR)
     if data[4] != 0xfe:
         return None
-    logger.debug('Dialect '+hex(struct.unpack('<H', data[0x48:0x4a])[0]))
+    logger.debug(addr+' SMB2 Dialect '+hex(struct.unpack('<H', data[0x48:0x4a])[0]))
     boottime = datetime.datetime.fromtimestamp((struct.unpack('<Q', data[0x74:0x7c])[0] / 10000000) - 11644473600)
     return str(datetime.datetime.now() - boottime) + ' (booted '+boottime.strftime('%H:%M:%S %d %b %Y')+')'
 
@@ -206,11 +306,12 @@ def get_host_by_name(host):
 def get_addrs_by_host(host, name_server=None):
     ''' return list of addresses for the host '''
     resolver = get_resolver(name_server)
-    logger.debug('Resolving {} via {}'.format(host, name_server or 'default DNS'))
     try:
         answer = resolver.query(host)
-        logger.debug('Answer '+', '.join([a.address for a in answer]))
+        logger.debug('Resolved {} to {} via {}'.format(host, ', '.join([a.address for a in answer]),
+                                                       name_server or 'default DNS'))
     except Exception:
+        logger.debug('Name resolution failed for '+host)
         return []
     return [a.address for a in answer]
 
@@ -221,10 +322,11 @@ def get_addr_by_host(host, name_server=None):
 def get_fqdn_by_addr(addr, name_server=None):
     resolver = get_resolver(name_server)
     arpa = '.'.join(reversed(addr.split('.'))) + '.in-addr.arpa.'
-    logger.debug('Resolving {} via {}'.format(arpa, name_server or 'default'))
     try:
         answer = resolver.query(arpa, 'PTR', 'IN')
+        logger.debug('Resolved {} to {} via {}'.format(arpa, str(answer[0])[:-1], name_server or 'default'))
     except Exception:
+        logger.debug('Name resolution failed for '+arpa)
         return None
     return str(answer[0])[:-1]
 
@@ -257,9 +359,12 @@ def get_computers(conn, dc, attributes=[], hostnames=[]):
                                         'operatingSystemServicePack', 'lastLogon', 'logonCount',
                                         'operatingSystemHotfix', 'operatingSystemVersion',
                                         'location', 'managedBy', 'description']))
+    hostnames = set(map(str.lower, hostnames))
     if len(hostnames):
         hosts = ''
         for h in hostnames:
+            if h.count('.'):
+                h = h.split('.', maxsplit=1)[0]
             hosts += '(cn={})'.format(h)
         if len(hostnames) > 1:
             hosts = '(|' + hosts + ')'
@@ -418,7 +523,8 @@ def get_default_pwd_policy(args, conn, dc):
                 smb.ntlm.MD4 = MyMD4Class.new
             dc_hostname = args.hostname or \
                           get_host_by_addr(args.server, args.name_server) or \
-                          get_host_by_addr(args.server, args.server)
+                          get_host_by_addr(args.server, args.server) or \
+                          get_host_by_addr(args.server)
             if not dc_hostname:
                 raise socket.herror
             logger.debug('dc_hostname: '+dc_hostname)
@@ -552,32 +658,71 @@ def group_handler(args, conn, dc):
             except:
                 print(cn(u['dn']))
 
+def ping_host(addr):
+    ''' check if host is alive by first calling out to ping, then
+    by initiating a connection on tcp/445 '''
+    if not is_addr(addr):
+        return False
+    if sys.platform.lower().startswith('windows'):
+        cmd = 'ping -n 1 -w 1 '+addr
+    else:
+        cmd = 'ping -c 1 -W 1 '+addr
+    logger.debug('Running '+cmd)
+    try:
+        subprocess.check_call(cmd.split(), stderr=subprocess.STDOUT, stdout=open(os.devnull, 'w'))
+        return True
+    except Exception:
+        pass
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.5)
+    logger.debug('Connecting to {}:445'.format(addr))
+    try:
+        s.connect((addr, 445))
+        return True
+    except socket.timeout:
+        return False
+
+def computer_info_thread(computer, args):
+    ''' runs as a thread to resolve and find uptime of the host '''
+    hostname = computer['attributes']['dNSHostName'][0]
+    info = ''
+    if args.resolve or args.uptime or args.alive:
+        for name_server in set([args.name_server, args.server, None]):
+            addr = get_addr_by_host(hostname, name_server)
+            if addr:
+                break
+        if addr:
+            if args.alive and not ping_host(addr):
+                logger.debug('Host '+addr+' is down')
+                return
+            info = 'Address: {}\n'.format(addr)
+            if args.uptime:
+                smbinfo = get_smb_info(addr)
+                if smbinfo:
+                    for k in sorted(smbinfo.keys()):
+                        info += '{}: {}\n'.format(k, smbinfo[k])
+                # uptime = get_uptime(addr)
+                # if uptime:
+                #     info += 'uptime: {}\n'.format(uptime)
+        elif args.alive:
+            logger.debug('Host '+addr+' may be down')
+            return
+    for a in sorted(computer['attributes'].keys()):
+        if a.lower() in ['whencreated']:
+            info += '{}: {}\n'.format(a, get_attr(computer, a, '', gt_to_str))
+        elif a.lower() in ['lastlogon']:
+            info += '{}: {}\n'.format(a, get_attr(computer, a, '', lambda x:ft_to_str(int(x))))
+        else:
+            info += '{}: {}\n'.format(a, ', '.join(computer['attributes'][a]))
+    if args.dn:
+        sys.stdout.write('dn: '+computer['dn'] + os.linesep + info + os.linesep)
+    else:
+        sys.stdout.write('cn: '+cn(computer['dn']) + os.linesep + info + os.linesep)
+
 def computers_handler(args, conn, dc):
     computers = get_computers(conn, dc, args.attributes, args.computers)
-    for c in computers:
-        info = ''
-        for a in sorted(c['attributes'].keys()):
-            if a.lower() in ['whencreated']:
-                info += '{}: {}\n'.format(a, get_attr(c, a, '', gt_to_str))
-            elif a.lower() in ['lastlogon']:
-                info += '{}: {}\n'.format(a, get_attr(c, a, '', lambda x:ft_to_str(int(x))))
-            else:
-                info += '{}: {}\n'.format(a, ', '.join(c['attributes'][a]))
-        hostname = c['attributes']['dNSHostName'][0]
-        if args.resolve or args.uptime:
-            addr = get_addr_by_host(hostname, args.name_server) or \
-                   get_addr_by_host(hostname, args.server) or \
-                   get_host_by_name(hostname)
-            if addr:
-                info = 'Address: {}\n'.format(addr) + info
-                if args.uptime:
-                    uptime = get_uptime(addr)
-                    if uptime:
-                        info += 'uptime: {}\n'.format(uptime)
-        if args.dn:
-            print('dn: '+c.get('dn', c), info, sep=os.linesep)
-        else:
-            print('cn: '+cn(c['dn']), info, sep=os.linesep)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as e:
+        concurrent.futures.wait([e.submit(computer_info_thread, c, args) for c in computers])
 
 def policy_handler(args, conn, dc):
     pol = get_default_pwd_policy(args, conn, dc)
@@ -691,6 +836,7 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--server', help='domain controller addr or name. default: dns lookup on domain')
     parser.add_argument('-H', '--hostname', help='DC hostname. never required')
     parser.add_argument('-d', '--domain', help='default is to use domain of server')
+    parser.add_argument('--threads', type=int, default=50, help='name resolution/uptime thread count')
     parser.add_argument('--port', type=int, help='default 389 or 636 with --tls. 3268 for global catalog')
     parser.add_argument('--smb-port', dest='smb_port', default=445, type=int, help='default 445')
     parser.add_argument('--smbclient', action='store_true', help='force use of smbclient over pysmb')
@@ -733,13 +879,16 @@ if __name__ == '__main__':
     computer_parser.add_argument('-r', '--resolve', action='store_true', help='resolve hostnames')
     computer_parser.add_argument('-a', '--attributes', default=[], type=lambda x:x.split(','), help='additional attributes to retrieve')
     computer_parser.add_argument('computers', nargs='+', help='computers to search')
+    computer_parser.add_argument('--alive', action='store_true', help='only show alive hosts')
 
     computers_parser = subparsers.add_parser('computers', help='list computers')
     computers_parser.set_defaults(handler=computers_handler)
     computers_parser.set_defaults(computers=[])
     computers_parser.add_argument('-u', '--uptime', action='store_true', help='get uptime via SMB2')
     computers_parser.add_argument('-r', '--resolve', action='store_true', help='resolve hostnames')
-    computers_parser.add_argument('-a', '--attributes', default=[], type=lambda x:x.split(','), help='additional attributes to retrieve')
+    computers_parser.add_argument('-a', '--attributes', default=[], type=lambda x:x.split(','),
+                                  help='additional attributes to retrieve')
+    computers_parser.add_argument('--alive', action='store_true', help='only show alive hosts')
 
     query_parser = subparsers.add_parser('query', help='perform custom ldap query')
     query_parser.set_defaults(handler=query_handler)
@@ -811,7 +960,6 @@ if __name__ == '__main__':
     if not args.server:
         # attempt to find a DC
         logger.info('Looking for domain controller for '+args.domain)
-        #addrs = get_addrs_by_host(args.domain, args.name_server)
         args.server = get_dc(args.domain, args.name_server)
         if not args.server:
             print('Error: Failed to find a domain controller')
