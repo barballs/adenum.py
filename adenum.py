@@ -64,11 +64,12 @@ https://msdn.microsoft.com/en-us/library/ms675090(v=vs.85).aspx
 '''
 
 logger = logging.getLogger(__name__)
+gtimeout = 2
 
 def get_smb_info(addr):
     info = {'smbVersions':set()}
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(0.5)
+    s.settimeout(gtimeout)
     try:
         s.connect((addr, 445))
     except Exception:
@@ -94,8 +95,7 @@ def get_smb_info(addr):
         dialects = ['PC NETWORK PROGRAM 1.0', 'MICROSOFT NETWORKS 1.03', 'MICROSOFT NETWORKS 3.0',
                     'LANMAN1.0', 'LM1.2X002', 'DOS LANMAN2.1', 'LANMAN2.1', 'Samba', 'NT LANMAN 1.0',
                     'NT LM 0.12']
-        info['smbDialect'] = dialects[struct.unpack('<H', data[37:39])[0]]
-        info['smbVersion'] = 1
+        info['smbNegotiated'] = dialects[struct.unpack('<H', data[37:39])[0]]
     else:
         dialect = struct.unpack('<H', data[0x48:0x4a])[0]
         boottime = datetime.datetime.fromtimestamp((struct.unpack('<Q', data[0x74:0x7c])[0] / 10000000) - 11644473600)
@@ -107,18 +107,17 @@ def get_smb_info(addr):
             s.send(binascii.unhexlify(
                 b'000000b6fe534d4240000000000000000000000000000000000000000100'
                 b'000000000000000000000000000000000000000000000000000000000000'
-                b'000000000000000024000800010000007f000000') + \
-                os.urandom(16) + \
+                b'000000000000000024000800010000007f000000') + os.urandom(16) + \
                 binascii.unhexlify(
-                    b'780000000200000002021002220224020003020310031103'
-                    b'000000000100260000000000010020000100') + \
-                os.urandom(32) + \
+                    b'780000000200000002021002220224020003020310031103000000000100'
+                    b'260000000000010020000100') + os.urandom(32) + \
                 binascii.unhexlify(b'00000200060000000000020001000200')
             )
             data = s.recv(4096)
             dialect = struct.unpack('<H', data[0x48:0x4a])[0]
         s.shutdown(socket.SHUT_RDWR)
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)        
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(gtimeout)
         s.connect((addr, 445))
         # send SMB1 NegotiateProtocolRequest with SMB1 dialects only
         s.send(binascii.unhexlify(
@@ -130,8 +129,7 @@ def get_smb_info(addr):
             b'4c414e4d414e322e31000253616d626100024e54204c414e4d414e20312e'
             b'3000024e54204c4d20302e313200'
         ))
-        info['smbDialect'] = hex(dialect)
-        info['smbVersion'] = dialect >> 8
+        info['smbNegotiated'] = hex(dialect)
         if dialect > 3:
             info['smbVersions'].add(3)
         logger.debug('MaxSMBVersion: '+hex(dialect))
@@ -146,11 +144,11 @@ def get_smb_info(addr):
             b'0000009cff534d4273000000001843c800004253525350594c200000ffff') + \
         os.urandom(2) + \
         binascii.unhexlify(
-            b'000001000cff000000ffff02000100000000004a000000000054c000'
-            b'806100604806062b0601050502a03e303ca00e300c060a2b060104018237'
-            b'02020aa22a04284e544c4d53535000010000001582086200000000280000'
-            b'000000000028000000060100000000000f0055006e006900780000005300'
-            b'61006d00620061000000')
+            b'000001000cff000000ffff02000100000000004a000000000054c0008061'
+            b'00604806062b0601050502a03e303ca00e300c060a2b0601040182370202'
+            b'0aa22a04284e544c4d535350000100000015820862000000002800000000'
+            b'00000028000000060100000000000f0055006e0069007800000053006100'
+            b'6d00620061000000')
     )
     data = s.recv(4096)
     size = struct.unpack('<H', data[43:45])[0]
@@ -169,7 +167,7 @@ def get_uptime(addr):
     to elicit an SMB2 NegotiateProtocolRequest. Works even if SMB1 is disabled on
     the remote host. '''
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(0.5)
+    s.settimeout(gtimeout)
     try:
         s.connect((addr, 445))
     except Exception:
@@ -268,6 +266,8 @@ def get_resolver(name_server=None):
     else:
         # use nameserver configured for the host
         resolver = dns.resolver
+    resolver.timeout = 1
+    resolver.lifetime = 1
     return resolver
 
 def get_dc(domain, name_server=None):
@@ -664,9 +664,9 @@ def ping_host(addr):
     if not is_addr(addr):
         return False
     if sys.platform.lower().startswith('windows'):
-        cmd = 'ping -n 1 -w 1 '+addr
+        cmd = 'ping -n 1 -w {} {}'.format(gtimeout, addr)
     else:
-        cmd = 'ping -c 1 -W 1 '+addr
+        cmd = 'ping -c 1 -W {} {}'.format(gtimeout, addr)
     logger.debug('Running '+cmd)
     try:
         subprocess.check_call(cmd.split(), stderr=subprocess.STDOUT, stdout=open(os.devnull, 'w'))
@@ -836,7 +836,8 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--server', help='domain controller addr or name. default: dns lookup on domain')
     parser.add_argument('-H', '--hostname', help='DC hostname. never required')
     parser.add_argument('-d', '--domain', help='default is to use domain of server')
-    parser.add_argument('--threads', type=int, default=50, help='name resolution/uptime thread count')
+    parser.add_argument('--timeout', type=int, default=gtimeout, help='timeout for network operations')
+    parser.add_argument('--threads', type=int, default=50, help='name resolution/uptime worker count')
     parser.add_argument('--port', type=int, help='default 389 or 636 with --tls. 3268 for global catalog')
     parser.add_argument('--smb-port', dest='smb_port', default=445, type=int, help='default 445')
     parser.add_argument('--smbclient', action='store_true', help='force use of smbclient over pysmb')
@@ -908,6 +909,7 @@ if __name__ == '__main__':
     modify_parser.add_argument('values', nargs='*', default=[], help='value(s) to add/modify')
 
     args = parser.parse_args()
+    gtimeout = args.timeout
 
     if args.debug:
         logger.setLevel(logging.DEBUG)
@@ -1006,7 +1008,8 @@ if __name__ == '__main__':
     server = ldap3.Server(args.server, get_info=get_info, use_ssl=args.tls, port=args.port, tls=tls_config)
     auth = ldap3.ANONYMOUS if args.anonymous else ldap3.NTLM
     conn = CachingConnection(server, user=username, password=password, authentication=auth,
-                             version=args.version, read_only=False, auto_range=True, auto_bind=False)
+                             version=args.version, read_only=False, auto_range=True,
+                             auto_bind=False, receive_timeout=args.timeout)
 
     conn.open()
     if args.starttls:
