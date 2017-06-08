@@ -57,6 +57,11 @@ List domain admins
 List domain joined computers. Add -r and -u to resolve hostnames and get uptime (SMB2 only).
     python3 adenum.py -u USER -P -d mydomain.local computers
 
+= TODO =
+Find a better workaround for AD 1000 results limit.
+OS fingerprinting limited to SMB1 hosts, use NTLM auth to get
+OS info.
+
 = RESOURCES =
 
 all defined AD attributes
@@ -64,18 +69,19 @@ https://msdn.microsoft.com/en-us/library/ms675090(v=vs.85).aspx
 '''
 
 logger = logging.getLogger(__name__)
-gtimeout = 2
+GTIMEOUT = 2
 
-def get_smb_info(addr):
+def get_smb_info(addr, timeout=GTIMEOUT):
     info = {'smbVersions':set()}
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(gtimeout)
+    s.settimeout(timeout)
     try:
         s.connect((addr, 445))
     except Exception:
         return None
 
-    # send SMB1 NegotiateProtocolRequest with SMB2 dialects
+    # send SMB1 NegotiateProtocolRequest with SMB2 dialects. will lead to SMB2
+    # negotiation even if SMB1 is disabled.
     s.send(binascii.unhexlify(
         b'000000d4ff534d4272000000001843c80000000000000000000000000000'
         b'feff0000000000b100025043204e4554574f524b2050524f4752414d2031'
@@ -115,9 +121,11 @@ def get_smb_info(addr):
             )
             data = s.recv(4096)
             dialect = struct.unpack('<H', data[0x48:0x4a])[0]
+            if dialect >= 0x300:
+                info['smbVersions'].add(3)
         s.shutdown(socket.SHUT_RDWR)
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(gtimeout)
+        s.settimeout(timeout)
         s.connect((addr, 445))
         # send SMB1 NegotiateProtocolRequest with SMB1 dialects only
         s.send(binascii.unhexlify(
@@ -130,44 +138,43 @@ def get_smb_info(addr):
             b'3000024e54204c4d20302e313200'
         ))
         info['smbNegotiated'] = hex(dialect)
-        if dialect > 3:
-            info['smbVersions'].add(3)
         logger.debug('MaxSMBVersion: '+hex(dialect))
         try:
             s.recv(4096)
         except ConnectionResetError:
-            return info
+            s = None
 
-    # SMB1 SessionSetup with random PID
-    s.send(
-        binascii.unhexlify(
-            b'0000009cff534d4273000000001843c800004253525350594c200000ffff') + \
-        os.urandom(2) + \
-        binascii.unhexlify(
-            b'000001000cff000000ffff02000100000000004a000000000054c0008061'
-            b'00604806062b0601050502a03e303ca00e300c060a2b0601040182370202'
-            b'0aa22a04284e544c4d535350000100000015820862000000002800000000'
-            b'00000028000000060100000000000f0055006e0069007800000053006100'
-            b'6d00620061000000')
-    )
-    data = s.recv(4096)
-    size = struct.unpack('<H', data[43:45])[0]
-    native_os, native_lm = data[47+size:].split(b'\x00\x00\x00', maxsplit=1)
-    native_os += b'\x00'
-    native_lm = native_lm[:-2]
-    info['native_os'] = native_os.decode('utf-16-le')
-    info['native_lm'] = native_lm.decode('utf-16-le')
-    info['smbVersions'].add(1)
-    s.shutdown(socket.SHUT_RDWR)
+    if s:
+        # SMB1 SessionSetup with random PID
+        s.send(
+            binascii.unhexlify(
+                b'0000009cff534d4273000000001843c800004253525350594c200000ffff') + \
+            os.urandom(2) + \
+            binascii.unhexlify(
+                b'000001000cff000000ffff02000100000000004a000000000054c0008061'
+                b'00604806062b0601050502a03e303ca00e300c060a2b0601040182370202'
+                b'0aa22a04284e544c4d535350000100000015820862000000002800000000'
+                b'00000028000000060100000000000f0055006e0069007800000053006100'
+                b'6d00620061000000')
+        )
+        data = s.recv(4096)
+        size = struct.unpack('<H', data[43:45])[0]
+        native_os, native_lm = data[47+size:].split(b'\x00\x00\x00', maxsplit=1)
+        native_os += b'\x00'
+        native_lm = native_lm[:-2]
+        info['native_os'] = native_os.decode('utf-16-le')
+        info['native_lm'] = native_lm.decode('utf-16-le')
+        info['smbVersions'].add(1)
+        s.shutdown(socket.SHUT_RDWR)
     info['smbVersions'] = ', '.join(map(str, info['smbVersions']))
     return info
 
-def get_uptime(addr):
+def get_uptime(addr, timeout=GTIMEOUT):
     ''' Return uptime string for SMB2+ hosts. Sends a SMB1 NegotiateProtocolRequest
     to elicit an SMB2 NegotiateProtocolRequest. Works even if SMB1 is disabled on
     the remote host. '''
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(gtimeout)
+    s.settimeout(timeout)
     try:
         s.connect((addr, 445))
     except Exception:
@@ -195,8 +202,8 @@ class CachingConnection(ldap3.Connection):
     def search(self, search_base, search_filter, search_scope=ldap3.SUBTREE, **kwargs):
         if 'attributes' not in kwargs:
             kwargs['attributes'] = []
-        if not len([a for a in kwargs['attributes'] if a.startswith('range=')]):
-            kwargs['attributes'].append('range=0-*')
+        #kwargs['paged_size'] = 1000
+        #kwargs['paged_criticality'] = True
 
         sha1 = hashlib.new('sha1', b''.join(
             str(a).lower().encode() for a in [search_base, search_filter]+list(kwargs.values()))).digest()
@@ -206,21 +213,34 @@ class CachingConnection(ldap3.Connection):
             return
         logger.debug('SEARCH ({}) {} {} ATTRS {}'.format(search_base, search_filter, search_scope,
                                                       ', '.join(kwargs['attributes'])))
+        response = []
         super().search(
             search_base,
             search_filter,
+            search_scope,
             **kwargs
         )
         # return only the results
-        response = []
         for obj in self.response:
             if obj['type'].lower() == 'searchresentry':
-                for a in [a for a in obj['attributes'] if a.startswith('range=')]:
+                for a in [a for a in obj['attributes'] if a.startswith('member;range=')]:
                     del obj['attributes'][a]
                 response.append(obj)
+        # try:
+        #     cookie = self.result['controls']['1.2.840.113556.1.4.319']['value']['cookie']
+        # except KeyError:
+        #     break
+        # kwargs['paged_cookie'] = cookie
+
         self.response = response
         logger.debug('RESULT '+str(self.result))
+        logger.debug('COUNT '+str(len(self.response)))
         self.cache[sha1] = self.response
+            
+        # if self.result['result'] == 4:
+        #     kwargs['attributes'].append('range=1000-*')
+        #     self.response += self.search(search_base, search_filter, search_scope=ldap3.SUBTREE, **kwargs)
+        #     return self.response
         
 private_addrs = (
     [2130706432, 4278190080], # 127.0.0.0,   255.0.0.0
@@ -259,15 +279,15 @@ def get_attr(o, attr, default=None, trans=None):
         return trans(v)
     return v
 
-def get_resolver(name_server=None):
+def get_resolver(name_server=None, timeout=GTIMEOUT):
     if name_server:
         resolver = dns.resolver.Resolver()
         resolver.nameservers = [name_server]
     else:
         # use nameserver configured for the host
         resolver = dns.resolver
-    resolver.timeout = 1
-    resolver.lifetime = 1
+    resolver.timeout = timeout
+    resolver.lifetime = timeout
     return resolver
 
 def get_dc(domain, name_server=None):
@@ -340,10 +360,20 @@ def dw(d):
     ''' convert attrs stored as dwords to an int '''
     return 0 if d == 0 else 0xffffffff + d + 1
 
-def get_users(conn, dc):
+def get_users(conn, dc, active_only=False):
     ''' get all domain users '''
-    conn.search(dc, '(objectCategory=user)', attributes=['userPrincipalName'])
-    return conn.response
+    if active_only:
+        raise NotImplementedError
+    #search_filter = '(&(objectCategory=user)'
+    else:
+        search_filter = '(objectCategory=user)'
+    results = []
+    conn.search(dc, "(&(objectCategory=user)(cn>=m))", attributes=['userPrincipalName'])
+    results.extend(conn.response)
+    conn.search(dc, "(&(objectCategory=user)(!(cn>=m)))", attributes=['userPrincipalName'])
+    results.extend(conn.response)
+    #conn.search(dc, "(objectCategory=user)", attributes=['userPrincipalName'])
+    return results
 
 def get_groups(conn, dc):
     ''' get all domain users '''
@@ -360,6 +390,8 @@ def get_computers(conn, dc, attributes=[], hostnames=[]):
                                         'operatingSystemHotfix', 'operatingSystemVersion',
                                         'location', 'managedBy', 'description']))
     hostnames = set(map(str.lower, hostnames))
+    results = []
+    filters = []
     if len(hostnames):
         hosts = ''
         for h in hostnames:
@@ -368,10 +400,15 @@ def get_computers(conn, dc, attributes=[], hostnames=[]):
             hosts += '(cn={})'.format(h)
         if len(hostnames) > 1:
             hosts = '(|' + hosts + ')'
-        conn.search(dc, '(&(objectCategory=computer){})'.format(hosts), attributes=attributes)
+        filters.append('(&(objectCategory=computer)(cn>=m){})'.format(hosts))
+        filters.append('(&(objectCategory=computer)(!(cn>=m)){})'.format(hosts))
     else:
-        conn.search(dc, '(objectCategory=computer)', attributes=attributes)
-    return [g for g in conn.response if g.get('dn', None)]
+        filters.append('(&(objectCategory=computer)(cn>=m))')
+        filters.append('(&(objectCategory=computer)(!(cn>=m)))')
+    for f in filters:
+        conn.search(dc, f, attributes=attributes)
+        results.extend(conn.response)
+    return [g for g in results if g.get('dn', None)]
 
 def gid_from_sid(sid):
     if type(sid) == str:
@@ -486,6 +523,8 @@ def get_user_info(conn, dc, user):
         'middleName',
         'lastlogontimestamp',
         'useraccountcontrol',
+        'objectGUID',
+        'objectSid',
     ]
     attrs = [a for a in attributes if a.lower() in allowed]
     conn.search(dc, '(&(objectCategory=user)(distinguishedName={}))'.format(user_dn), attributes=attrs)
@@ -573,6 +612,8 @@ def user_handler(args, conn, dc):
         if not u.get('attributes'):
             continue
         a = u['attributes']
+        # print(a['objectGUID'])
+        # print(a['objectSid'])
         # https://msdn.microsoft.com/en-us/library/ms680832.aspx
         print('UserName                 ', a['name'][0])
         print('FullName                 ', get_attr(a, 'givenName', ''), get_attr(a, 'middleName', ''))
@@ -658,15 +699,15 @@ def group_handler(args, conn, dc):
             except:
                 print(cn(u['dn']))
 
-def ping_host(addr):
+def ping_host(addr, timeout=GTIMEOUT):
     ''' check if host is alive by first calling out to ping, then
     by initiating a connection on tcp/445 '''
     if not is_addr(addr):
         return False
     if sys.platform.lower().startswith('windows'):
-        cmd = 'ping -n 1 -w {} {}'.format(gtimeout, addr)
+        cmd = 'ping -n 1 -w {} {}'.format(timeout, addr)
     else:
-        cmd = 'ping -c 1 -W {} {}'.format(gtimeout, addr)
+        cmd = 'ping -c 1 -W {} {}'.format(timeout, addr)
     logger.debug('Running '+cmd)
     try:
         subprocess.check_call(cmd.split(), stderr=subprocess.STDOUT, stdout=open(os.devnull, 'w'))
@@ -836,7 +877,7 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--server', help='domain controller addr or name. default: dns lookup on domain')
     parser.add_argument('-H', '--hostname', help='DC hostname. never required')
     parser.add_argument('-d', '--domain', help='default is to use domain of server')
-    parser.add_argument('--timeout', type=int, default=gtimeout, help='timeout for network operations')
+    parser.add_argument('--timeout', type=int, default=GTIMEOUT, help='timeout for network operations')
     parser.add_argument('--threads', type=int, default=50, help='name resolution/uptime worker count')
     parser.add_argument('--port', type=int, help='default 389 or 636 with --tls. 3268 for global catalog')
     parser.add_argument('--smb-port', dest='smb_port', default=445, type=int, help='default 445')
@@ -909,7 +950,7 @@ if __name__ == '__main__':
     modify_parser.add_argument('values', nargs='*', default=[], help='value(s) to add/modify')
 
     args = parser.parse_args()
-    gtimeout = args.timeout
+    GTIMEOUT = args.timeout
 
     if args.debug:
         logger.setLevel(logging.DEBUG)
