@@ -59,8 +59,6 @@ List domain joined computers. Add -r and -u to resolve hostnames and get uptime 
 
 = TODO =
 Find a better workaround for AD 1000 results limit.
-OS fingerprinting limited to SMB1 hosts, use NTLM auth to get
-OS info.
 
 = RESOURCES =
 
@@ -123,6 +121,18 @@ def get_smb_info(addr, timeout=GTIMEOUT):
             dialect = struct.unpack('<H', data[0x48:0x4a])[0]
             if dialect >= 0x300:
                 info['smbVersions'].add(3)
+        # send SMB2 SessionSetupRequest
+        s.send(binascii.unhexlify(
+            b'000000a2fe534d4240000100000000000100002000000000000000000200'
+            b'000000000000000000000000000000000000000000000000000000000000'
+            b'000000000000000019000001010000000000000058004a00000000000000'
+            b'0000604806062b0601050502a03e303ca00e300c060a2b06010401823702'
+            b'020aa22a04284e544c4d5353500001000000158208620000000028000000'
+            b'0000000028000000060100000000000f'
+        ))
+        data = s.recv(4096)
+        ntlmssp = data[data.find(b'NTLMSSP\x00\x02\x00\x00\x00'):]
+        info['build'] = '{}.{} build {}'.format(ntlmssp[48], ntlmssp[49], struct.unpack('<H', ntlmssp[50:52])[0])
         s.shutdown(socket.SHUT_RDWR)
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
@@ -400,8 +410,10 @@ def get_computers(conn, dc, attributes=[], hostnames=[]):
             hosts += '(cn={})'.format(h)
         if len(hostnames) > 1:
             hosts = '(|' + hosts + ')'
-        filters.append('(&(objectCategory=computer)(cn>=m){})'.format(hosts))
-        filters.append('(&(objectCategory=computer)(!(cn>=m)){})'.format(hosts))
+            filters.append('(&(objectCategory=computer)(cn>=m){})'.format(hosts))
+            filters.append('(&(objectCategory=computer)(!(cn>=m)){})'.format(hosts))
+        else:
+            filters.append('(&(objectCategory=computer){})'.format(hosts))
     else:
         filters.append('(&(objectCategory=computer)(cn>=m))')
         filters.append('(&(objectCategory=computer)(!(cn>=m)))')
