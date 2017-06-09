@@ -69,6 +69,10 @@ https://msdn.microsoft.com/en-us/library/ms675090(v=vs.85).aspx
 logger = logging.getLogger(__name__)
 GTIMEOUT = 2
 
+def set_global_timeout(t):
+    global GTIMEOUT
+    GTIMEOUT = t
+
 def get_smb_info(addr, timeout=GTIMEOUT):
     info = {'smbVersions':set()}
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -300,30 +304,30 @@ def get_resolver(name_server=None, timeout=GTIMEOUT):
     resolver.lifetime = timeout
     return resolver
 
-def get_dc(domain, name_server=None):
-    ''' return the domain controller for a given domain '''
+def get_domain_controllers(domain, name_server=None):
+    ''' return the domain controller addresses for a given domain '''
     resolver = get_resolver(name_server)
-    logger.debug('Resolving _ldap._tcp.'+domain)
-    try:
-        # first, try a DNS service query
-        answer = resolver.query('_ldap._tcp.'+domain, 'SRV')
-        logger.debug('Answer '+str(answer[0].split()[-1]))
-    except Exception:
-        answer = None
-    if not answer:
-        logger.debug('Resolving '+domain)
+    queries = [
+        ('_ldap._tcp.dc._msdsc.'+domain, 'SRV'), # joining domain
+        ('_ldap._tcp.'+domain, 'SRV'),
+        (domain, 'A'),
+    ]
+    answer = None
+    for q in queries:
         try:
-            # second, try standard lookup for the domain name
-            answer = resolver.query(domain)
-            logger.debug('Answer '+str(answer[0].split()[-1]))
-        except Exception:
-            pass
+            logger.debug('Resolving {} via {}'.format(q[0], name_server or 'default'))
+            answer = resolver.query(q[0], q[1])
+            logger.debug('Answer '+str(answer[0]).split()[-1])
+            break
+        except Exception as e:
+            logger.debug('Failed to resolve {} via {}'.format(q[0], name_server or 'default'))
     if not answer:
         # last, try using the default name lookup for your host (may include hosts file)
         addr = get_host_by_name(domain)
         if addr:
             answer = [addr]
-    return get_addr_by_host(str(answer[0]).split()[-1], name_server) if answer and len(answer) else None
+    hostnames = [str(a).split()[-1] for a in answer]
+    return list(filter(None, [get_addr_by_host(h, name_server) for h in hostnames]))
 
 def get_host_by_name(host):
     logger.debug('Resolving {} via default'.format(host))
@@ -1015,8 +1019,9 @@ if __name__ == '__main__':
     if not args.server:
         # attempt to find a DC
         logger.info('Looking for domain controller for '+args.domain)
-        args.server = get_dc(args.domain, args.name_server)
-        if not args.server:
+        try:
+            args.server = get_domain_controllers(args.domain, args.name_server)[0]
+        except IndexError:
             print('Error: Failed to find a domain controller')
             sys.exit()
         logger.info('Found a domain controller for {} at {}'.format(args.domain, args.server))

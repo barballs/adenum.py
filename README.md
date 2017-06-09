@@ -37,11 +37,26 @@ $ python3 adenum.py -u USER -P -d mydomain.local group "domain admins"
 ### List domain joined computers.
 Add -r and -u to resolve hostnames and get uptime (SMB2 only).
 ```
-$ python3 adenum.py -u USER -P -d mydomain.local computers
+$ python3 adenum.py -u USER -P -d mydomain.local computers -r -u
 ```
 
-### Resources
-all defined AD attributes
+## Resources
+All defined AD attributes
 ```
 https://msdn.microsoft.com/en-us/library/ms675090(v=vs.85).aspx
+```
+
+## Additional Scripts
+Additional scripts are included that provide a subset of adenum's capabilities.
+
+### smbinfo.py
+Probes targets for SMB versions, uptime, and build information. Accepts nmap XML files.
+```
+$ python3 smbinfo.py IP1 IP2 .. IPN
+```
+
+### getdc.py
+List domain controllers for provided domain.
+```
+$ python3 getdc.py -d mydomain.local
 ```
