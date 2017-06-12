@@ -24,6 +24,7 @@ if not args.domain:
 
 if not args.domain:
     print('Error: must specify a domain')
+    sys.exit()
 
 for addr in adenum.get_domain_controllers(args.domain, args.name_server):
     name = adenum.get_fqdn_by_addr(addr, args.name_server)

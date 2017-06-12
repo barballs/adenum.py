@@ -216,6 +216,7 @@ class CachingConnection(ldap3.Connection):
     def search(self, search_base, search_filter, search_scope=ldap3.SUBTREE, **kwargs):
         if 'attributes' not in kwargs:
             kwargs['attributes'] = []
+        kwargs['time_limit'] = GTIMEOUT
         #kwargs['paged_size'] = 1000
         #kwargs['paged_criticality'] = True
 
@@ -225,8 +226,7 @@ class CachingConnection(ldap3.Connection):
             logger.debug('CACHE HIT')
             self.response = self.cache[sha1]
             return
-        logger.debug('SEARCH ({}) {} {} ATTRS {}'.format(search_base, search_filter, search_scope,
-                                                      ', '.join(kwargs['attributes'])))
+        logger.debug('SEARCH ({}) {} {}'.format(search_base, search_filter, search_scope))
         response = []
         super().search(
             search_base,
@@ -248,10 +248,10 @@ class CachingConnection(ldap3.Connection):
 
         self.response = response
         logger.debug('RESULT '+str(self.result))
-        logger.debug('COUNT '+str(len(self.response)))
         self.cache[sha1] = self.response
-            
-        # if self.result['result'] == 4:
+
+        if self.result['result'] == 4:
+            logger.warn('Max results reached: '+str(len(self.response)))
         #     kwargs['attributes'].append('range=1000-*')
         #     self.response += self.search(search_base, search_filter, search_scope=ldap3.SUBTREE, **kwargs)
         #     return self.response
@@ -304,11 +304,22 @@ def get_resolver(name_server=None, timeout=GTIMEOUT):
     resolver.lifetime = timeout
     return resolver
 
-def get_domain_controllers(domain, name_server=None):
+def get_domain_controllers_by_ldap(conn, search_base):
+    search_base = 'OU=Domain Controllers,'+search_base
+    conn.search(search_base, '(objectCategory=computer)', search_scope=ldap3.LEVEL, attributes=['dNSHostName'])
+    servers = []
+    for s in conn.response:
+        hostname = s['attributes']['dNSHostName'][0]
+        addr = get_addr_by_host(hostname, args.name_server)
+        if addr:
+            servers.append([addr, hostname])
+    return servers
+
+def get_domain_controllers_by_dns(domain, name_server=None):
     ''' return the domain controller addresses for a given domain '''
     resolver = get_resolver(name_server)
     queries = [
-        ('_ldap._tcp.dc._msdsc.'+domain, 'SRV'), # joining domain
+        ('_ldap._tcp.dc._msdcs.'+domain, 'SRV'), # joining domain
         ('_ldap._tcp.'+domain, 'SRV'),
         (domain, 'A'),
     ]
@@ -326,8 +337,13 @@ def get_domain_controllers(domain, name_server=None):
         addr = get_host_by_name(domain)
         if addr:
             answer = [addr]
-    hostnames = [str(a).split()[-1] for a in answer]
-    return list(filter(None, [get_addr_by_host(h, name_server) for h in hostnames]))
+    servers = []
+    for a in answer:
+        hostname = str(a).split()[-1]
+        addr = get_addr_by_host(h, name_server)
+        if addr:
+            servers.append([addr, hostname])
+    return servers
 
 def get_host_by_name(host):
     logger.debug('Resolving {} via default'.format(host))
@@ -374,7 +390,7 @@ def dw(d):
     ''' convert attrs stored as dwords to an int '''
     return 0 if d == 0 else 0xffffffff + d + 1
 
-def get_users(conn, dc, active_only=False):
+def get_users(conn, search_base, active_only=False):
     ''' get all domain users '''
     if active_only:
         raise NotImplementedError
@@ -382,23 +398,22 @@ def get_users(conn, dc, active_only=False):
     else:
         search_filter = '(objectCategory=user)'
     results = []
-    conn.search(dc, "(&(objectCategory=user)(cn>=m))", attributes=['userPrincipalName'])
+    conn.search(search_base, "(&(objectCategory=user)(cn>=m))", attributes=['userPrincipalName'])
     results.extend(conn.response)
-    conn.search(dc, "(&(objectCategory=user)(!(cn>=m)))", attributes=['userPrincipalName'])
+    conn.search(search_base, "(&(objectCategory=user)(!(cn>=m)))", attributes=['userPrincipalName'])
     results.extend(conn.response)
-    #conn.search(dc, "(objectCategory=user)", attributes=['userPrincipalName'])
     return results
 
-def get_groups(conn, dc):
+def get_groups(conn, search_base):
     ''' get all domain users '''
     # use domain as base to get builtin and domain groups in one query
     # alternatively, you can do 2 queries with bases:
     #    cn=users,cn=mydomain,cn=com
     #    cn=users,cn=builtins,cn=mydomain,cn=com
-    conn.search(dc, '(objectCategory=group)', attributes=['objectSid', 'groupType'])
+    conn.search(search_base, '(objectCategory=group)', attributes=['objectSid', 'groupType'])
     return [g for g in conn.response if g.get('dn', None)]
 
-def get_computers(conn, dc, attributes=[], hostnames=[]):
+def get_computers(conn, search_base, attributes=[], hostnames=[]):
     attributes = list(set(attributes + ['name', 'dNSHostName', 'whenCreated', 'operatingSystem',
                                         'operatingSystemServicePack', 'lastLogon', 'logonCount',
                                         'operatingSystemHotfix', 'operatingSystemVersion',
@@ -422,7 +437,7 @@ def get_computers(conn, dc, attributes=[], hostnames=[]):
         filters.append('(&(objectCategory=computer)(cn>=m))')
         filters.append('(&(objectCategory=computer)(!(cn>=m)))')
     for f in filters:
-        conn.search(dc, f, attributes=attributes)
+        conn.search(search_base, f, attributes=attributes)
         results.extend(conn.response)
     return [g for g in results if g.get('dn', None)]
 
@@ -431,19 +446,19 @@ def gid_from_sid(sid):
         sid = sid.encode()
     return struct.unpack('<H', sid[-4:-2])[0]
 
-def get_user_dn(conn, dc, user):
-    conn.search(dc, '(&(objectCategory=user)(|(userPrincipalName={}@*)(cn={})))'.format(user, user))
+def get_user_dn(conn, search_base, user):
+    conn.search(search_base, '(&(objectCategory=user)(|(userPrincipalName={}@*)(cn={})))'.format(user, user))
     return conn.response[0]['dn']
 
-def get_user_groups(conn, dc, user):
+def get_user_groups(conn, search_base, user):
     ''' get all groups for user, domain and local. see groupType attribute to check domain vs local.
     user should be a dn'''
-    conn.search(dc, '(&(objectCategory=User)(distinguishedName='+user+'))', attributes=['memberOf', 'primaryGroupID'])
+    conn.search(search_base, '(&(objectCategory=User)(distinguishedName='+user+'))', attributes=['memberOf', 'primaryGroupID'])
     group_dns = conn.response[0]['attributes']['memberOf']
 
     # get primary group which is not included in the memberOf attribute
     pgid = int(conn.response[0]['attributes']['primaryGroupID'][0])
-    groups = get_groups(conn, dc)
+    groups = get_groups(conn, search_base)
     for g in groups:
         # Builtin group SIDs are returned as str's, not bytes
         if type(g['attributes']['objectSid'][0]) == str:
@@ -453,23 +468,23 @@ def get_user_groups(conn, dc, user):
     group_dns = list(map(str.lower, group_dns))
     return [g for g in groups if g['dn'].lower() in group_dns]
 
-def get_users_in_group(conn, dc, group):
+def get_users_in_group(conn, search_base, group):
     ''' return all members of group '''
-    groups = get_groups(conn, dc)
+    groups = get_groups(conn, search_base)
     group = [g for g in groups if cn(g.get('dn', '')).lower() == group.lower()][0] # get group dn
     gid = gid_from_sid(group['attributes']['objectSid'][0])
     # get all users with primaryGroupID of gid
-    conn.search(dc, '(&(objectCategory=user)(primaryGroupID={}))'.format(gid),
+    conn.search(search_base, '(&(objectCategory=user)(primaryGroupID={}))'.format(gid),
                 attributes=['distinguishedName', 'userPrincipalName'])
     users = [u for u in conn.response if u.get('dn', False)]
     # get all users in group using "memberOf" attribute. primary group is not included in the "memberOf" attribute
-    conn.search(dc, '(&(objectCategory=user)(memberOf='+group['dn']+'))', attributes=['distinguishedName', 'userPrincipalName'])
+    conn.search(search_base, '(&(objectCategory=user)(memberOf='+group['dn']+'))', attributes=['distinguishedName', 'userPrincipalName'])
     users += [u for u in conn.response if u.get('dn', False)]
     return users
 
-def get_pwd_policy(conn, dc):
+def get_pwd_policy(conn, search_base):
     ''' return non-default password policies for the domain '''
-    base = 'cn=Password Settings Container,cn=System,'+dc
+    base = 'cn=Password Settings Container,cn=System,'+search_base
     # https://technet.microsoft.com/en-us/library/2007.12.securitywatch.aspx
     attrs = [
         'name',
@@ -493,9 +508,9 @@ def get_pwd_policy(conn, dc):
             response.append(r)
     return response
 
-def get_user_info(conn, dc, user):
-    user_dn = get_user_dn(conn, dc, user)
-    conn.search(dc, '(&(objectCategory=user)(distinguishedName={}))'.format(user_dn), attributes=['allowedAttributes'])
+def get_user_info(conn, search_base, user):
+    user_dn = get_user_dn(conn, search_base, user)
+    conn.search(search_base, '(&(objectCategory=user)(distinguishedName={}))'.format(user_dn), attributes=['allowedAttributes'])
     allowed = set([a.lower() for a in conn.response[0]['attributes']['allowedAttributes']])
     attributes = [
         #'msexchhomeservername',
@@ -543,7 +558,7 @@ def get_user_info(conn, dc, user):
         'objectSid',
     ]
     attrs = [a for a in attributes if a.lower() in allowed]
-    conn.search(dc, '(&(objectCategory=user)(distinguishedName={}))'.format(user_dn), attributes=attrs)
+    conn.search(search_base, '(&(objectCategory=user)(distinguishedName={}))'.format(user_dn), attributes=attrs)
     return conn.response
 
 class MyMD4Class():
@@ -556,12 +571,12 @@ class MyMD4Class():
     def digest(self):
         return self.nthash
 
-def get_default_pwd_policy(args, conn, dc):
+def get_default_pwd_policy(args, conn):
     ''' default password policy is what gets returned by "net accounts"
     The policy is stored as a GPO on the sysvol share. It's stored in an INI file.
     The default policy is not returned by get_pwd_policy() '''
     if conn:
-        conn.search('cn=Policies,cn=System,'+dc, '(cn={31B2F340-016D-11D2-945F-00C04FB984F9})',
+        conn.search('cn=Policies,cn=System,'+args.search_base, '(cn={31B2F340-016D-11D2-945F-00C04FB984F9})',
                     attributes=['gPCFileSysPath'])
         gpo_path = conn.response[0]['attributes']['gPCFileSysPath'][0]
     else:
@@ -623,8 +638,8 @@ def get_default_pwd_policy(args, conn, dc):
 def timestr_or_never(t):
     return 'Never' if t in [0, 0x7FFFFFFFFFFFFFFF] else ft_to_str(t)
 
-def user_handler(args, conn, dc):
-    for u in [get_user_info(conn, dc, user)[0] for user in args.users]:
+def user_handler(args, conn):
+    for u in [get_user_info(conn, args.search_base, user)[0] for user in args.users]:
         if not u.get('attributes'):
             continue
         a = u['attributes']
@@ -666,7 +681,7 @@ def user_handler(args, conn, dc):
         except:
             pass
 
-        groups = get_user_groups(conn, dc, u['dn'])
+        groups = get_user_groups(conn, args.search_base, u['dn'])
         primary_group = [g['dn'] for g in groups if struct.unpack('<H', g['attributes']['objectSid'][0][-4:-2])[0] == int(a['primaryGroupID'][0])][0]
         print('PrimaryGroup              "{}"'.format(primary_group if args.dn else cn(primary_group)))
         # group scopes: https://technet.microsoft.com/en-us/library/cc755692.aspx
@@ -684,8 +699,8 @@ def user_handler(args, conn, dc):
         print('GlobalGroupMemberships   ', ', '.join(map(lambda x:'"{}"'.format(x if args.dn else cn(x)), global_groups)))
         print('')
 
-def users_handler(args, conn, dc):
-    users = get_users(conn, dc)
+def users_handler(args, conn):
+    users = get_users(conn, args.search_base)
     for u in users:
         if 'dn' in u:
             if args.dn:
@@ -697,15 +712,15 @@ def users_handler(args, conn, dc):
                     # NOTE: CN is not guaranteed to be unique
                     print(cn(u['dn']))
 
-def groups_handler(args, conn, dc):
-    for g in get_groups(conn, dc):
+def groups_handler(args, conn):
+    for g in get_groups(conn, args.search_base):
         if args.dn:
             print(g['dn'])
         else:
             print(cn(g['dn']))
 
-def group_handler(args, conn, dc):
-    members = get_users_in_group(conn, dc, args.group)
+def group_handler(args, conn):
+    members = get_users_in_group(conn, args.search_base, args.group)
     for u in members:
         if args.dn:
             print(u.get('dn', u))
@@ -721,9 +736,9 @@ def ping_host(addr, timeout=GTIMEOUT):
     if not is_addr(addr):
         return False
     if sys.platform.lower().startswith('windows'):
-        cmd = 'ping -n 1 -w {} {}'.format(timeout, addr)
+        cmd = 'ping -n 1 -w {} {}'.format(float(timeout), addr)
     else:
-        cmd = 'ping -c 1 -W {} {}'.format(timeout, addr)
+        cmd = 'ping -c 1 -W {} {}'.format(float(timeout), addr)
     logger.debug('Running '+cmd)
     try:
         subprocess.check_call(cmd.split(), stderr=subprocess.STDOUT, stdout=open(os.devnull, 'w'))
@@ -731,7 +746,7 @@ def ping_host(addr, timeout=GTIMEOUT):
     except Exception:
         pass
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(0.5)
+    s.settimeout(timeout)
     logger.debug('Connecting to {}:445'.format(addr))
     try:
         s.connect((addr, 445))
@@ -776,13 +791,13 @@ def computer_info_thread(computer, args):
     else:
         sys.stdout.write('cn: '+cn(computer['dn']) + os.linesep + info + os.linesep)
 
-def computers_handler(args, conn, dc):
-    computers = get_computers(conn, dc, args.attributes, args.computers)
+def computers_handler(args, conn):
+    computers = get_computers(conn, args.search_base, args.attributes, args.computers)
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as e:
         concurrent.futures.wait([e.submit(computer_info_thread, c, args) for c in computers])
 
-def policy_handler(args, conn, dc):
-    pol = get_default_pwd_policy(args, conn, dc)
+def policy_handler(args, conn):
+    pol = get_default_pwd_policy(args, conn)
     if pol:
         attrs = ['MinimumPasswordLength', 'PasswordComplexity', 'MinimumPasswordAge', 'MaximumPasswordAge',
                  'PasswordHistorySize', 'LockoutBadCount', 'ResetLockoutCount', 'LockoutDuration',
@@ -795,7 +810,7 @@ def policy_handler(args, conn, dc):
         print('')
     # sort policies by precedence. precedence is used to determine which policy applies to a user
     # whem multiple policies are applied to him/her
-    pols = sorted(get_pwd_policy(conn, dc), key=lambda p:int(p['attributes']['msDS-PasswordSettingsPrecedence'][0]))
+    pols = sorted(get_pwd_policy(conn, args.search_base), key=lambda p:int(p['attributes']['msDS-PasswordSettingsPrecedence'][0]))
     for a in [p['attributes'] for p in pols]:
         print('--------', a['name'][0], '--------')
         print('MinimumPasswordLength          ', a['msDS-MinimumPasswordLength'][0])
@@ -817,7 +832,7 @@ def custom_query(conn, base, _filter, scope=ldap3.SUBTREE, attrs=None):
     conn.search(base, _filter, search_scope=scope, attributes=attrs)
     return conn.response
 
-def query_handler(args, conn, dc):
+def query_handler(args, conn):
     if args.scope.lower() == 'level':
         scope = ldap3.LEVEL
     elif args.scope.lower() == 'base':
@@ -828,9 +843,11 @@ def query_handler(args, conn, dc):
         raise ValueError('scope must be either "level", "base", or "subtree"')
 
     if args.base:
-        base = args.base+','+dc if args.append else args.base
+        base = args.base+','+args.search_base if args.append else args.base
+    elif args.base is None:
+        base = args.search_base
     else:
-        base = dc
+        base = ''
 
     if args.allowed:
         # range doesn't seem to work...
@@ -848,7 +865,53 @@ def query_handler(args, conn, dc):
                 print(a, get_attr(r, a, ''))
             print('')
 
-def modify_handler(args, conn, dc):
+def get_dc_info(args, conn=None):
+    if not conn:
+        server = ldap3.Server(args.server)
+        conn = CachingConnection(server, authentication=ldap3.ANONYMOUS, version=args.version, auto_bind=True,
+                                 receive_timeout=GTIMEOUT)
+
+    conn.search('', '(objectClass=*)', search_scope=ldap3.BASE, dereference_aliases=ldap3.DEREF_NEVER,
+                attributes=['dnsHostName', 'supportedLDAPVersion', 'rootDomainNamingContext',
+                            'domainFunctionality', 'forestFunctionality', 'domainControllerFunctionality'])
+    r = conn.response[0]['raw_attributes']
+    for a in r:
+        if a == 'supportedLDAPVersion':
+            r[a] = list(sorted(map(int, r[a])))
+        elif type(r[a][0]) == bytes:
+            r[a] = r[a][0].decode()
+            if a.endswith('Functionality'):
+                r[a] = int(r[a])
+        else:
+            r[a] = r[a][0]
+    r['search_base'] = 'DC='+r['dnsHostName'].split('.', maxsplit=1)[0]+','+r['rootDomainNamingContext']
+    return r
+
+def dc_handler(args, conn):
+    func_levels = {
+        0:'2000',
+        1:'2003_Mixed_Domains',
+        2:'2003',
+        3:'2008',
+        4:'2008r2',
+        5:'2012',
+        6:'2012r2',
+        7:'2016',
+    }
+    servers = get_domain_controllers_by_ldap(get_connection(args), args.search_base)
+    for addr, hostname in servers:
+        r = get_dc_info(args, get_connection(args, addr))
+        print('address                         ', addr)
+        print('dnsHostName                     ', r['dnsHostName'])
+        print('supportedLDAPVersions           ', ', '.join(map(str, r['supportedLDAPVersion'])))
+        print('search_base                     ', r['search_base'])
+        print('domainControllerFunctionality   ', func_levels[r['domainControllerFunctionality']])
+        print('domainFunctionality             ', func_levels[r['domainFunctionality']])
+        print('forestFunctionality             ', func_levels[r['forestFunctionality']])
+        print()
+
+
+def modify_handler(args, conn):
     # 'MODIFY_ADD', 'MODIFY_DELETE', 'MODIFY_INCREMENT', 'MODIFY_REPLACE'
     raise NotImplementedError
     action_map = {'add':ldap3.MODIFY_ADD, 'del':ldap3.MODIFY_DELETE, 'inc':ldap3.MODIFY_INCREMENT, 'replace':ldap3.MODIFY_REPLACE}
@@ -882,6 +945,38 @@ def gt_to_dt(g):
 def gt_to_str(g):
     return gt_to_dt(g).strftime('%m/%d/%Y %I:%M:%S %p')
 
+def get_connection(args, addr=None):
+    username = None
+    password = None
+    if not args.anonymous:
+        username =  args.domain+'\\'+args.username
+        if args.prompt:
+            args.password = getpass.getpass()
+        if args.nthash:
+            if len(args.password) != 32:
+                print('Error: ntlm hash must be 32 hex chars')
+                sys.exit()
+            # ldap3 takes LM:NTLM hash then discards the LM hash so we fake the LM hash
+            password = '00000000000000000000000000000000:'+args.password
+        else:
+            password = args.password
+            logger.debug('NTHASH '+hashlib.new('md4', password.encode('utf-16-le')).hexdigest())
+
+    # avail: PROTOCOL_SSLv23, PROTOCOL_TLSv1, PROTOCOL_TLSv1_1, PROTOCOL_TLSv1_2
+    tls_config = ldap3.Tls(validate=ssl.CERT_NONE if args.insecure else ssl.CERT_OPTIONAL,
+                           version=ssl.PROTOCOL_TLSv1)
+    server = ldap3.Server(addr or args.server, use_ssl=args.tls, port=args.port, tls=tls_config, get_info=None)
+    auth = ldap3.ANONYMOUS if args.anonymous else ldap3.NTLM
+    conn = CachingConnection(server, user=username, password=password, authentication=auth,
+                             version=args.version, read_only=True, auto_range=True,
+                             auto_bind=False, receive_timeout=args.timeout)
+
+    conn.open()
+    if args.starttls:
+        conn.start_tls()
+    conn.bind()
+    return conn
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=DESCRIPTION, formatter_class=argparse.RawTextHelpFormatter)
     user_parser = parser.add_mutually_exclusive_group()
@@ -903,11 +998,10 @@ if __name__ == '__main__':
     parser.add_argument('--debug', action='store_true', help='implies --verbose')
     parser.add_argument('--name-server', dest='name_server', help='specify name server. typically this is the domain controller')
     parser.add_argument('--dn', action='store_true', help='list distinguished names of AD objects')
-    parser.add_argument('--info', action='store_true', help='get server info')
-    parser.add_argument('--schema', action='store_true', help='get server schema')
     parser.add_argument('--insecure', action='store_true', help='ignore invalid tls certs')
     #parser.add_argument('--cert', help='')
     #parser.add_argument('--auth', default='ntlm', type=str.lower, choices=['ntlm', 'kerb'], help='auth type')
+    parser.set_defaults(search_base=None)
     parser.set_defaults(handler=None)
 
     tls_group = parser.add_mutually_exclusive_group()
@@ -915,6 +1009,10 @@ if __name__ == '__main__':
     tls_group.add_argument('--start-tls', dest='starttls', action='store_true',  help='use START_TLS')
 
     subparsers = parser.add_subparsers(help='choose an action')
+
+    info_parser = subparsers.add_parser('dc', help='retrieve DC info')
+    info_parser.set_defaults(handler=dc_handler)
+
     users_parser = subparsers.add_parser('users', help='list all users')
     users_parser.set_defaults(handler=users_handler)
     user_parser = subparsers.add_parser('user', help='get user info')
@@ -993,7 +1091,7 @@ if __name__ == '__main__':
             args.domain, args.username = args.username.split('\\')
 
     if not args.domain or args.domain.count('.') == 0:
-        logger.debug('checking for domain name')
+        logger.debug('Checking for domain name')
         args.domain = None
         if not args.server:
             if args.name_server:
@@ -1003,6 +1101,10 @@ if __name__ == '__main__':
             if not args.domain and args.server != args.name_server:
                 # try query against the domain controller
                 args.domain = get_fqdn_by_addr(args.server, args.server)
+                if not args.domain:
+                    logger.debug('Querying LDAP for domain')
+                    info = get_dc_info(args.server)
+                    args.domain = info['rootDomainNamingContext'][2:].replace(',', '.')
         if not args.domain:
             print('Error: Failed to get domain. Try supplying the fqdn with --domain')
             sys.exit()
@@ -1020,70 +1122,29 @@ if __name__ == '__main__':
         # attempt to find a DC
         logger.info('Looking for domain controller for '+args.domain)
         try:
-            args.server = get_domain_controllers(args.domain, args.name_server)[0]
+            args.server = get_domain_controllers_by_dns(args.domain, args.name_server)[0][0]
         except IndexError:
             print('Error: Failed to find a domain controller')
             sys.exit()
         logger.info('Found a domain controller for {} at {}'.format(args.domain, args.server))
 
-    dc = 'dc='+args.domain.replace('.', ',dc=')
+    args.search_base = 'dc='+args.domain.replace('.', ',dc=')
     logger.debug('DC     '+args.server)
     logger.debug('PORT   '+str(args.port))
     logger.debug('DOMAIN '+args.domain)
     logger.debug('LOGIN  '+args.username)
+    logger.debug('BASE   '+args.search_base)
     logger.debug('DNS    '+ (args.name_server or 'default'))
     if not is_private_addr(args.server) and not args.insecure:
         raise Warning('Aborting due to public LDAP server. use --insecure to override')
 
-    if args.info and args.schema:
-        get_info = ldap3.ALL
-    elif args.info:
-        get_info = ldap3.DSA
-    elif args.schema:
-        get_info = ldap3.SCHEMA
-    else:
-        get_info = None
-    
-    # avail: PROTOCOL_SSLv23, PROTOCOL_TLSv1, PROTOCOL_TLSv1_1, PROTOCOL_TLSv1_2
-    username = None
-    password = None
-    if not args.anonymous:
-        username =  args.domain+'\\'+args.username
-        if args.prompt:
-            args.password = getpass.getpass()
-        if args.nthash:
-            if len(args.password) != 32:
-                print('Error: ntlm hash must be 32 hex chars')
-                sys.exit()
-            # ldap3 takes LM:NTLM hash then discards the LM hash so we fake the LM hash
-            password = '00000000000000000000000000000000:'+args.password
-        else:
-            password = args.password
-            logger.debug('NTHASH '+hashlib.new('md4', password.encode('utf-16-le')).hexdigest())
-
-    tls_config = ldap3.Tls(validate=ssl.CERT_NONE if args.insecure else ssl.CERT_OPTIONAL,
-                           version=ssl.PROTOCOL_TLSv1)
-    server = ldap3.Server(args.server, get_info=get_info, use_ssl=args.tls, port=args.port, tls=tls_config)
-    auth = ldap3.ANONYMOUS if args.anonymous else ldap3.NTLM
-    conn = CachingConnection(server, user=username, password=password, authentication=auth,
-                             version=args.version, read_only=False, auto_range=True,
-                             auto_bind=False, receive_timeout=args.timeout)
-
-    conn.open()
-    if args.starttls:
-        conn.start_tls()
-    conn.bind()
-
-    if args.info:
-        print(server.info)
-    if args.schema:
-        print(server.schema)
+    conn = get_connection(args)
 
     if not conn.bound:
         print('Error: failed to bind')
         sys.exit()
-    logger.debug(conn.extend.standard.who_am_i())
+    logger.debug('WHOAMI '+(conn.extend.standard.who_am_i() or ''))
 
     if args.handler:
-        args.handler(args, conn, dc)
+        args.handler(args, conn)
     conn.unbind()
