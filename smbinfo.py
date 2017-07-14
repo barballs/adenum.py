@@ -30,7 +30,7 @@ def get_smb_info_thread(addr, args):
             s += 'Uptime:        {}\n'.format(info.get('uptime', ''))
             s += 'Date:          {}\n'.format(info.get('date', ''))
         if args.domain or args.all:
-            s += 'AuthContext:   {}\n'.format(info['auth_context'])
+            s += 'AuthRealm:     {}\n'.format(info['auth_context'])
             s += 'DnsDomain:     {}\n'.format(info['dns_domain'])
             s += 'DnsName:       {}\n'.format(info['dns_name'])
             s += 'NetBIOSDomain: {}\n'.format(info['netbios_domain'])
@@ -46,7 +46,7 @@ parser.add_argument('-a', '--all', action='store_true', help='get all informatio
 parser.add_argument('-u', '--uptime', action='store_true', help='report uptime. SMB2 only')
 parser.add_argument('-x', '--nmap', help='nmap xml file. checks for open 445')
 parser.add_argument('-t', '--timeout', type=float, default=2, help='socket timeout in seconds')
-parser.add_argument('--threads', type=int, default=50, help='worker threads count. defaults to 50')
+parser.add_argument('--threads', type=int, default=50, help='worker thread count. defaults to 50')
 args = parser.parse_args()
 hosts = set(args.hosts)
 if args.nmap:
@@ -59,7 +59,5 @@ if args.nmap:
             hosts.add([e.get('addr') for e in host.findall('./address') if e.get('addrtype') == 'ipv4'][0])
 if args.csv:
     print('host', 'smbNegotiated', 'native_os', 'native_lm', 'smbVersions', sep=',')
-get_smb_info_thread(list(hosts)[0], args)
-sys.exit()
 with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as e:
     concurrent.futures.wait([e.submit(get_smb_info_thread, h, args) for h in set(hosts)])

@@ -88,6 +88,8 @@ def parse_target_info(ti, info):
         info['dns_name'] = v.decode('utf-16-le')
     elif t == 0x4:
         info['dns_domain'] = v.decode('utf-16-le')
+    # elif t == 0x5:
+    #     info['dns_tree_name'] = v.decode('utf-16-le')
     # elif t == 0x7:
     #     info['time'] = filetime_to_str(struct.unpack('<Q', v)[0])
     parse_target_info(ti[4+l:], info)
@@ -779,7 +781,7 @@ def users_handler(args, conn):
                     try:
                         print(u['attributes']['userPrincipalName'][0].split('@')[0])
                     except:
-                        print(u['attributes'].get('samAccountName', [u['dn']])[0])
+                        print(u['attributes'].get('samAccountName', [cn(u['dn'])])[0])
             print()
             # get accounts that can replicate the DC
     else:
@@ -950,9 +952,7 @@ def query_handler(args, conn):
 def get_dc_info(args, conn=None):
     if not conn:
         server = ldap3.Server(args.server)
-        conn = CachingConnection(server, authentication=ldap3.ANONYMOUS, version=args.version, auto_bind=True,
-                                 receive_timeout=GTIMEOUT)
-
+        conn = ldap3.Connection(server, auto_bind=True, version=args.version, receive_timeout=GTIMEOUT)
     conn.search('', '(objectClass=*)', search_scope=ldap3.BASE, dereference_aliases=ldap3.DEREF_NEVER,
                 attributes=['dnsHostName', 'supportedLDAPVersion', 'rootDomainNamingContext',
                             'domainFunctionality', 'forestFunctionality', 'domainControllerFunctionality'])
@@ -1193,7 +1193,7 @@ if __name__ == '__main__':
                 if not fqdn:
                     logger.debug('Querying LDAP for domain')
                     info = get_dc_info(args)
-                    fqdn = info['rootDomainNamingContext'][2:].replace(',', '.')
+                    fqdn = 'fake.' + info['rootDomainNamingContext'][3:].lower().replace(',dc=', '.')
         if fqdn:
             args.domain = fqdn.split('.', maxsplit=1)[-1]
         if not args.domain:
