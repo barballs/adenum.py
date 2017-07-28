@@ -95,12 +95,12 @@ def parse_target_info(ti, info):
     parse_target_info(ti[4+l:], info)
 
 
-def get_smb_info(addr, timeout=GTIMEOUT):
+def get_smb_info(addr, timeout=GTIMEOUT, port=445):
     info = {'smbVersions':set()}
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
-        s.connect((addr, 445))
+        s.connect((addr, port))
     except Exception:
         return None
 
@@ -121,7 +121,10 @@ def get_smb_info(addr, timeout=GTIMEOUT):
     except ConnectionResetError:
         return None
 
+    smb1_signing = None
+    smb2_signing = None
     if data[4] == 0xff:
+        smb1_signing = data[39]
         # SMB1 dialects sent in the first packet above, in the same order.
         dialects = ['PC NETWORK PROGRAM 1.0', 'MICROSOFT NETWORKS 1.03', 'MICROSOFT NETWORKS 3.0',
                     'LANMAN1.0', 'LM1.2X002', 'DOS LANMAN2.1', 'LANMAN2.1', 'Samba', 'NT LANMAN 1.0',
@@ -141,6 +144,7 @@ def get_smb_info(addr, timeout=GTIMEOUT):
         ntlmssp = data[data.find(b'NTLMSSP\x00\x02\x00\x00\x00'):]
     else:
         info['smbVersions'].add(2)
+        smb2_signing = data[70]
         dialect = struct.unpack('<H', data[0x48:0x4a])[0]
         boottime = datetime.datetime.fromtimestamp((struct.unpack('<Q', data[0x74:0x7c])[0] / 10000000) - 11644473600)
         systime = datetime.datetime.fromtimestamp((struct.unpack('<Q', data[0x6c:0x74])[0] / 10000000) - 11644473600)
@@ -178,7 +182,7 @@ def get_smb_info(addr, timeout=GTIMEOUT):
         s.shutdown(socket.SHUT_RDWR)
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
-        s.connect((addr, 445))
+        s.connect((addr, port))
         # send SMB1 NegotiateProtocolRequest with SMB1 dialects only
         s.send(binascii.unhexlify(
             b'000000beff534d4272000000001843c80000000000000000000000000000'
@@ -190,7 +194,8 @@ def get_smb_info(addr, timeout=GTIMEOUT):
             b'3000024e54204c4d20302e313200'
         ))
         try:
-            s.recv(4096)
+            data = s.recv(4096)
+            smb1_signing = data[39]
         except ConnectionResetError:
             s = None
 
@@ -228,16 +233,32 @@ def get_smb_info(addr, timeout=GTIMEOUT):
     logging.debug('TargetInfo-length '+str(ti_len))
     parse_target_info(ti, info)
     info['smbVersions'] = ', '.join(map(str, info['smbVersions']))
+    if smb1_signing is not None:
+        print('1', hex(smb1_signing))
+        if smb1_signing & 0x8:
+            info['smb1_signing'] = 'required'
+        elif smb1_signing & 0x4:
+            info['smb1_signing'] = 'enabled'
+        else:
+            info['smb1_signing'] = 'disabled'
+    if smb2_signing is not None:
+        print('2', hex(smb2_signing))
+        if smb2_signing & 0x2:
+            info['smb2_signing'] = 'required'
+        elif smb2_signing & 0x1:
+            info['smb2_signing'] = 'enabled'
+        else:
+            info['smb2_signing'] = 'disabled'
     return info
 
-def get_uptime(addr, timeout=GTIMEOUT):
+def get_uptime(addr, timeout=GTIMEOUT, port=445):
     ''' Return uptime string for SMB2+ hosts. Sends a SMB1 NegotiateProtocolRequest
     to elicit an SMB2 NegotiateProtocolRequest. Works even if SMB1 is disabled on
     the remote host. '''
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
-        s.connect((addr, 445))
+        s.connect((addr, port))
     except Exception:
         return None
     s.send(binascii.unhexlify(
