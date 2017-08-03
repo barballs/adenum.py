@@ -234,7 +234,6 @@ def get_smb_info(addr, timeout=GTIMEOUT, port=445):
     parse_target_info(ti, info)
     info['smbVersions'] = ', '.join(map(str, info['smbVersions']))
     if smb1_signing is not None:
-        print('1', hex(smb1_signing))
         if smb1_signing & 0x8:
             info['smb1_signing'] = 'required'
         elif smb1_signing & 0x4:
@@ -242,7 +241,6 @@ def get_smb_info(addr, timeout=GTIMEOUT, port=445):
         else:
             info['smb1_signing'] = 'disabled'
     if smb2_signing is not None:
-        print('2', hex(smb2_signing))
         if smb2_signing & 0x2:
             info['smb2_signing'] = 'required'
         elif smb2_signing & 0x1:
