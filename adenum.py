@@ -146,11 +146,12 @@ def get_smb_info(addr, timeout=GTIMEOUT, port=445):
         info['smbVersions'].add(2)
         smb2_signing = data[70]
         dialect = struct.unpack('<H', data[0x48:0x4a])[0]
-        boottime = datetime.datetime.fromtimestamp((struct.unpack('<Q', data[0x74:0x7c])[0] / 10000000) - 11644473600)
-        systime = datetime.datetime.fromtimestamp((struct.unpack('<Q', data[0x6c:0x74])[0] / 10000000) - 11644473600)
-        info['uptime'] = str(datetime.datetime.now() - boottime) + ' (booted '+ \
-                         boottime.strftime('%H:%M:%S %d %b %Y')+')'
-        info['date'] = systime.strftime('%H:%M:%S %d %b %Y')
+        boot_dt = datetime.datetime.fromtimestamp((struct.unpack('<Q', data[0x74:0x7c])[0] / 10000000) - 11644473600)
+        system_dt = datetime.datetime.fromtimestamp((struct.unpack('<Q', data[0x6c:0x74])[0] / 10000000) - 11644473600)
+        up_td = system_dt - boot_dt
+        boot_dt = datetime.datetime.now() - up_td
+        info['uptime'] = str(up_td) + ' (booted '+ boot_dt.strftime('%H:%M:%S %d %b %Y')+')'
+        info['date'] = system_dt.strftime('%H:%M:%S %d %b %Y')
         if dialect == 0x2ff:
             # send SMB2 NegotiateProtocolRequest with random client GUID and salt
             s.send(binascii.unhexlify(
@@ -224,7 +225,8 @@ def get_smb_info(addr, timeout=GTIMEOUT, port=445):
         info['smbVersions'].add(1)
         s.shutdown(socket.SHUT_RDWR)
     # get domain/workgroup info from NTLMSSP
-    info['build'] = '{}.{} build {}'.format(ntlmssp[48], ntlmssp[49], struct.unpack('<H', ntlmssp[50:52])[0])
+    info['kernel'] = '{}.{}'.format(ntlmssp[48], ntlmssp[49])
+    info['build'] = '{}'.format(struct.unpack('<H', ntlmssp[50:52])[0])
     flags = struct.unpack('<L', ntlmssp[20:24])[0]
     info['auth_context'] = 'domain' if flags & 0x10000 else 'workgroup'
     ti_len = struct.unpack('<H', ntlmssp[40:42])[0]
@@ -246,6 +248,7 @@ def get_smb_info(addr, timeout=GTIMEOUT, port=445):
         elif smb2_signing & 0x1:
             info['smb2_signing'] = 'enabled'
         else:
+            # this should never be the case on a Windows host
             info['smb2_signing'] = 'disabled'
     return info
 
