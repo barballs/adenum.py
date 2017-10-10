@@ -324,13 +324,13 @@ class CachingConnection(ldap3.Connection):
         #     kwargs['attributes'].append('range=1000-*')
         #     self.response += self.search(search_base, search_filter, search_scope=ldap3.SUBTREE, **kwargs)
         #     return self.response
-        
+
 private_addrs = (
     [2130706432, 4278190080], # 127.0.0.0,   255.0.0.0
     [3232235520, 4294901760], # 192.168.0.0, 255.255.0.0
     [2886729728, 4293918720], # 172.16.0.0,  255.240.0.0
     [167772160,  4278190080], # 10.0.0.0,    255.0.0.0
-) 
+)
 
 def is_private_addr(addr):
     addr = int.from_bytes(socket.inet_aton(addr), 'big')
@@ -480,8 +480,12 @@ def get_groups(conn, search_base):
     # alternatively, you can do 2 queries with bases:
     #    cn=users,cn=mydomain,cn=com
     #    cn=users,cn=builtins,cn=mydomain,cn=com
-    conn.search(search_base, '(objectCategory=group)', attributes=['objectSid', 'groupType'])
-    return [g for g in conn.response if g.get('dn', None)]
+    results = []
+    conn.search(search_base, '(&(objectCategory=group)(cn>=m))', attributes=['objectSid', 'groupType'])
+    results.extend(conn.response)
+    conn.search(search_base, '(&(objectCategory=group)(!(cn>=m)))', attributes=['objectSid', 'groupType'])
+    results.extend(conn.response)
+    return [g for g in results if g.get('dn', None)]
 
 def get_computers(conn, search_base, attributes=[], hostnames=[]):
     attributes = list(set(attributes + ['name', 'dNSHostName', 'whenCreated', 'operatingSystem',
