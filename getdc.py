@@ -18,11 +18,7 @@ if args.debug:
 
 if not args.domain:
     if args.name_server:
-<<<<<<< HEAD
-        name = get_fqdn_by_addr(args.name_server, args.name_server)
-=======
         name = adenum.get_fqdn_by_addr(args.name_server, args.name_server)
->>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
         if name:
             args.domain = name.split('.', maxsplit=1)[-1]
 
@@ -30,14 +26,9 @@ if not args.domain:
     print('Error: must specify a domain')
     sys.exit()
 
-<<<<<<< HEAD
 for addr in adenum.get_domain_controllers(args.domain, args.name_server):
     name = adenum.get_fqdn_by_addr(addr, args.name_server)
     if name:
         print(addr, '\t', name)
     else:
         print(addr)
-=======
-for addr in adenum.get_domain_controllers_by_dns(args.domain, args.name_server):
-    print(addr[0], '\t', addr[1])
->>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05

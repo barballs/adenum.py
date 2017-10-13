@@ -13,29 +13,6 @@ import xml.etree.ElementTree as ET
 from adenum import get_smb_info
 
 def get_smb_info_thread(addr, args):
-<<<<<<< HEAD
-    info = get_smb_info(addr, args.timeout)
-    if args.csv:
-        sys.stdout.write(','.join([
-            addr, str(info['smbNegotiated']), info.get('native_os', ''),
-            info.get('native_lm', ''), info['smbVersions'].replace(', ', '/')
-        ])+os.linesep)
-    else:
-        s =  'Address:   {}\n'.format(addr)
-        s += 'Version:   {}\n'.format(info['smbNegotiated'])
-        s += 'Build:     {}\n'.format(info.get('build', ''))
-        s += 'NativeOS:  {}\n'.format(info.get('native_os', ''))
-        s += 'NativeLM:  {}\n'.format(info.get('native_lm', ''))
-        s += 'Available: {}\n'.format(info['smbVersions'])
-        s += os.linesep
-        sys.stdout.write(s)
-
-parser = argparse.ArgumentParser()
-parser.add_argument('hosts', nargs='*', default=[], help='addresses to scan')
-parser.add_argument('-c', '--csv', action='store_true', help='output in CSV')
-parser.add_argument('-x', '--nmap', help='nmap xml file')
-parser.add_argument('-t', '--timeout', type=float, default=2, help='socket timeout in seconds')
-=======
     info = get_smb_info(addr, args.timeout, args.smb_port)
     if args.version:
         if info['auth_context'] == 'workgroup':
@@ -80,7 +57,7 @@ parser.add_argument('-x', '--nmap', help='nmap xml file. checks for open 445')
 parser.add_argument('-t', '--timeout', type=float, default=2, help='socket timeout in seconds. default 2')
 parser.add_argument('--smb-port', dest='smb_port', type=int, default=445, help='default 445')
 parser.add_argument('--threads', type=int, default=50, help='worker thread count. defaults to 50')
->>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
+
 args = parser.parse_args()
 hosts = set(args.hosts)
 if args.nmap:
@@ -91,14 +68,8 @@ if args.nmap:
         ports = [int(p.get('portid')) for p in host.findall('./ports/port') if p.find('state').get('state') == 'open']
         if 445 in ports:
             hosts.add([e.get('addr') for e in host.findall('./address') if e.get('addrtype') == 'ipv4'][0])
-<<<<<<< HEAD
-if args.csv:
-    print('host', 'smbNegotiated', 'native_os', 'native_lm', 'smbVersions', sep=',')
-with concurrent.futures.ThreadPoolExecutor(max_workers=50) as e:
-=======
 if args.file:
     for addr in open(args.file):
         hosts.add(addr.strip())
 with concurrent.futures.ThreadPoolExecutor(max_workers=args.threads) as e:
->>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
     concurrent.futures.wait([e.submit(get_smb_info_thread, h, args) for h in set(hosts)])

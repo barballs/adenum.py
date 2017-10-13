@@ -68,8 +68,13 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--domain', default='.', help='domain. default is local')
     parser.add_argument('-w', '--threads', type=int, default=1, help='default 1')
     parser.add_argument('-t', '--timeout', type=int, default=2, help='socket timeout. default 2s')
-    parser.add_argument('hosts', nargs='+', help='hostnames or addresses')
+    parser.add_argument('-f', '--file', help='address file, 1 per line')
+    parser.add_argument('hosts', nargs='*', help='hostnames or addresses')
     args = parser.parse_args()
+
+    if args.file:
+        for addr in open(args.file):
+            args.hosts.append(addr.strip())
 
     if args.prompt:
         args.password = getpass.getpass()
