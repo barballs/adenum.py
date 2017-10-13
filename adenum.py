@@ -1,23 +1,24 @@
-import sys
 import os
+import sys
+import ssl
+import math
 import struct
-import argparse
 import socket
-import binascii
-import configparser
 import logging
 import hashlib
-import ssl
-import subprocess
 import getpass
 import hashlib
 import datetime
 import tempfile
+import argparse
+import binascii
+import subprocess
+import configparser
 import concurrent.futures
 # non-std
 import ldap3
+import socks
 import dns.resolver
-# NOTE: pysmb is imported on demand
 
 DESCRIPTION = 'Enumerate ActiveDirectory users, groups, computers, and password policies'
 
@@ -59,6 +60,7 @@ List domain joined computers. Add -r and -u to resolve hostnames and get uptime 
 
 = TODO =
 Find a better workaround for AD 1000 results limit.
+--proxy won't forward DNS requests
 
 = RESOURCES =
 
@@ -292,8 +294,9 @@ class CachingConnection(ldap3.Connection):
         sha1 = hashlib.new('sha1', b''.join(
             str(a).lower().encode() for a in [search_base, search_filter]+list(kwargs.values()))).digest()
         if sha1 in self.cache:
-            logger.debug('CACHE HIT')
-            self.response = self.cache[sha1]
+            logger.debug('CACHE HIT ({}) {} {}'.format(search_base, search_filter, search_scope))
+            self.response = self.cache[sha1]['response']
+            self.result = self.cache[sha1]['result']
             return
         logger.debug('SEARCH ({}) {} {}'.format(search_base, search_filter, search_scope))
         response = []
@@ -317,7 +320,7 @@ class CachingConnection(ldap3.Connection):
 
         self.response = response
         logger.debug('RESULT {} {}'.format(len(self.response), str(self.result)))
-        self.cache[sha1] = self.response
+        self.cache[sha1] = {'response':self.response, 'result':self.result}
 
         if self.result['result'] == 4:
             logger.warn('Max results reached: '+str(len(self.response)))
@@ -464,7 +467,6 @@ def get_users(conn, search_base, active_only=False):
     ''' get all domain users '''
     if active_only:
         raise NotImplementedError
-    #search_filter = '(&(objectCategory=user)'
     else:
         search_filter = '(objectCategory=user)'
     results = []
@@ -695,6 +697,8 @@ def get_default_pwd_policy(args, conn):
         conn.connect(args.server, port=args.smb_port)
         attrs, size = conn.retrieveFile(sysvol, rel_path, tmp_file)
     else:
+        if args.proxy:
+            raise RuntimeError('Cannot use smbclient when --proxy is used')
         cmd = ['smbclient', '-p', str(args.smb_port), '--user={}\\{}'.format(args.domain, args.username),
                '//{}/{}'.format(args.server, sysvol), '-c', 'get "{}" {}'.format(rel_path, tmp_file.name)]
         if args.nthash:
@@ -739,16 +743,18 @@ def user_handler(args, conn):
         try:
             print('AccountCreated           ', gt_to_str(a['whenCreated'][0]))
             print('AccountExpires           ', timestr_or_never(int(a['accountExpires'][0])))
-            print('AccountLocked            ', 'Yes' if int(a['userAccountControl'][0]) & 0x10 else 'No')
+            print('AccountLocked            ', 'Yes' if int(a['lockoutTime'][0]) else 'No')
             print('AccountActive            ', 'No' if int(a['userAccountControl'][0]) & 0x2 else 'Yes')
         except:
             pass
 
+        print(a.keys())
         try:
             if len(a['lockoutTime']) == 0 or int(a['lockoutTime'][0]) == 0:
-                print('LockoutTime              ', 'No')
+                print('LockoutTime              ', '0')
             else:
-                print('LockoutTime              ', timestr_or_never(int(a['lockoutTime'])))
+                print('LockoutTime              ', timestr_or_never(int(a['lockoutTime'][0])))
+            #print('LockoutDuration          ', timestr_or_never(int(a['lockoutDuration'][0])))
             print('LastLogon                ', timestr_or_never(int(a['lastLogon'][0])))
 
             print('FailedLogins             ', a['badPwdCount'][0])
@@ -1093,10 +1099,12 @@ if __name__ == '__main__':
     parser.add_argument('-p', '--password', default=hashlib.new('md4', b'').hexdigest(), help='password')
     parser.add_argument('--nthash', action='store_true', help='password is an NTLM hash')
     parser.add_argument('-P', dest='prompt', action='store_true', help='prompt for password')
+    parser.add_argument('--proxy', help='socks5 proxy: eg 127.0.0.1:8888')
     parser.add_argument('-s', '--server', help='domain controller addr or name. default: dns lookup on domain')
     parser.add_argument('-H', '--hostname', help='DC hostname. never required')
     parser.add_argument('-d', '--domain', help='default is to use domain of server')
     parser.add_argument('--timeout', type=int, default=GTIMEOUT, help='timeout for network operations')
+    #parser.add_argument('--delay', type=int, default=0.0, help='delay between ldap queries')
     parser.add_argument('--threads', type=int, default=50, help='name resolution/uptime worker count')
     parser.add_argument('--port', type=int, help='default 389 or 636 with --tls. 3268 for global catalog')
     parser.add_argument('--smb-port', dest='smb_port', default=445, type=int, help='default 445')
@@ -1185,6 +1193,11 @@ if __name__ == '__main__':
         h = logging.StreamHandler()
         h.setFormatter(logging.Formatter('[%(levelname)s] %(message)s'))
         logger.addHandler(h)
+
+    if args.proxy:
+        proxy_host, proxy_port = args.proxy.split(':')
+        socks.set_default_proxy(socks.SOCKS5, proxy_host, int(proxy_port))
+        socket.socket = socks.socksocket
 
     if args.server and not is_addr(args.server):
         # resolve DC hostname
