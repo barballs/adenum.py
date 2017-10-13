@@ -73,12 +73,42 @@ def set_global_timeout(t):
     global GTIMEOUT
     GTIMEOUT = t
 
+<<<<<<< HEAD
 def get_smb_info(addr, timeout=GTIMEOUT):
+=======
+def parse_target_info(ti, info):
+    ''' parse the target info section of an NTLMSSP negotiation '''
+    if ti == b'\x00\x00\x00\x00':
+        return
+    t, l = struct.unpack('<HH', ti[:4])
+    v = ti[4:4+l]
+    logger.debug('TargetInfoType '+hex(t))
+    if t == 0x1:
+        info['netbios_name'] = v.decode('utf-16-le')
+    elif t == 0x2:
+        info['netbios_domain'] = v.decode('utf-16-le')
+    elif t == 0x3:
+        info['dns_name'] = v.decode('utf-16-le')
+    elif t == 0x4:
+        info['dns_domain'] = v.decode('utf-16-le')
+    # elif t == 0x5:
+    #     info['dns_tree_name'] = v.decode('utf-16-le')
+    # elif t == 0x7:
+    #     info['time'] = filetime_to_str(struct.unpack('<Q', v)[0])
+    parse_target_info(ti[4+l:], info)
+
+
+def get_smb_info(addr, timeout=GTIMEOUT, port=445):
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
     info = {'smbVersions':set()}
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
+<<<<<<< HEAD
         s.connect((addr, 445))
+=======
+        s.connect((addr, port))
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
     except Exception:
         return None
 
@@ -99,17 +129,50 @@ def get_smb_info(addr, timeout=GTIMEOUT):
     except ConnectionResetError:
         return None
 
+<<<<<<< HEAD
     if data[4] == 0xff:
+=======
+    smb1_signing = None
+    smb2_signing = None
+    if data[4] == 0xff:
+        smb1_signing = data[39]
+        # SMB1 dialects sent in the first packet above, in the same order.
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
         dialects = ['PC NETWORK PROGRAM 1.0', 'MICROSOFT NETWORKS 1.03', 'MICROSOFT NETWORKS 3.0',
                     'LANMAN1.0', 'LM1.2X002', 'DOS LANMAN2.1', 'LANMAN2.1', 'Samba', 'NT LANMAN 1.0',
                     'NT LM 0.12']
         info['smbNegotiated'] = dialects[struct.unpack('<H', data[37:39])[0]]
+<<<<<<< HEAD
     else:
         dialect = struct.unpack('<H', data[0x48:0x4a])[0]
         boottime = datetime.datetime.fromtimestamp((struct.unpack('<Q', data[0x74:0x7c])[0] / 10000000) - 11644473600)
         info['smbVersions'].add(2)
         info['uptime'] = str(datetime.datetime.now() - boottime) + ' (booted '+ \
                            boottime.strftime('%H:%M:%S %d %b %Y')+')'
+=======
+        # SessionSetup AndX Request
+        s.send(binascii.unhexlify(
+            b'0000009cff534d4273000000001843c8000000000000000000000000ffff'
+            b'976e000001000cff000000ffff02000100000000004a000000000054c000'
+            b'806100604806062b0601050502a03e303ca00e300c060a2b060104018237'
+            b'02020aa22a04284e544c4d53535000010000001582086200000000280000'
+            b'000000000028000000060100000000000f0055006e006900780000005300'
+            b'61006d00620061000000'
+            
+        ))
+        data = s.recv(4096)
+        ntlmssp = data[data.find(b'NTLMSSP\x00\x02\x00\x00\x00'):]
+    else:
+        info['smbVersions'].add(2)
+        smb2_signing = data[70]
+        dialect = struct.unpack('<H', data[0x48:0x4a])[0]
+        boot_dt = datetime.datetime.fromtimestamp((struct.unpack('<Q', data[0x74:0x7c])[0] / 10000000) - 11644473600)
+        system_dt = datetime.datetime.fromtimestamp((struct.unpack('<Q', data[0x6c:0x74])[0] / 10000000) - 11644473600)
+        up_td = system_dt - boot_dt
+        boot_dt = datetime.datetime.now() - up_td
+        info['uptime'] = str(up_td) + ' (booted '+ boot_dt.strftime('%H:%M:%S %d %b %Y')+')'
+        info['date'] = system_dt.strftime('%H:%M:%S %d %b %Y')
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
         if dialect == 0x2ff:
             # send SMB2 NegotiateProtocolRequest with random client GUID and salt
             s.send(binascii.unhexlify(
@@ -125,6 +188,11 @@ def get_smb_info(addr, timeout=GTIMEOUT):
             dialect = struct.unpack('<H', data[0x48:0x4a])[0]
             if dialect >= 0x300:
                 info['smbVersions'].add(3)
+<<<<<<< HEAD
+=======
+        info['smbNegotiated'] = hex(dialect)
+        logger.debug('MaxSMBVersion: '+hex(dialect))
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
         # send SMB2 SessionSetupRequest
         s.send(binascii.unhexlify(
             b'000000a2fe534d4240000100000000000100002000000000000000000200'
@@ -136,11 +204,18 @@ def get_smb_info(addr, timeout=GTIMEOUT):
         ))
         data = s.recv(4096)
         ntlmssp = data[data.find(b'NTLMSSP\x00\x02\x00\x00\x00'):]
+<<<<<<< HEAD
         info['build'] = '{}.{} build {}'.format(ntlmssp[48], ntlmssp[49], struct.unpack('<H', ntlmssp[50:52])[0])
         s.shutdown(socket.SHUT_RDWR)
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
         s.connect((addr, 445))
+=======
+        s.shutdown(socket.SHUT_RDWR)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((addr, port))
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
         # send SMB1 NegotiateProtocolRequest with SMB1 dialects only
         s.send(binascii.unhexlify(
             b'000000beff534d4272000000001843c80000000000000000000000000000'
@@ -151,10 +226,16 @@ def get_smb_info(addr, timeout=GTIMEOUT):
             b'4c414e4d414e322e31000253616d626100024e54204c414e4d414e20312e'
             b'3000024e54204c4d20302e313200'
         ))
+<<<<<<< HEAD
         info['smbNegotiated'] = hex(dialect)
         logger.debug('MaxSMBVersion: '+hex(dialect))
         try:
             s.recv(4096)
+=======
+        try:
+            data = s.recv(4096)
+            smb1_signing = data[39]
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
         except ConnectionResetError:
             s = None
 
@@ -172,25 +253,70 @@ def get_smb_info(addr, timeout=GTIMEOUT):
                 b'6d00620061000000')
         )
         data = s.recv(4096)
+<<<<<<< HEAD
         size = struct.unpack('<H', data[43:45])[0]
         native_os, native_lm = data[47+size:].split(b'\x00\x00\x00', maxsplit=1)
         native_os += b'\x00'
         native_lm = native_lm[:-2]
+=======
+        native_offset = 47 + struct.unpack('<H', data[43:45])[0]
+        # align to 16 bits
+        native_offset += native_offset % 2
+        native_os, native_lm = data[native_offset:].split(b'\x00\x00\x00', maxsplit=1)
+        native_os += b'\x00'
+        native_lm = native_lm.rstrip(b'\x00') + b'\x00'
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
         info['native_os'] = native_os.decode('utf-16-le')
         info['native_lm'] = native_lm.decode('utf-16-le')
         info['smbVersions'].add(1)
         s.shutdown(socket.SHUT_RDWR)
+<<<<<<< HEAD
     info['smbVersions'] = ', '.join(map(str, info['smbVersions']))
     return info
 
 def get_uptime(addr, timeout=GTIMEOUT):
+=======
+    # get domain/workgroup info from NTLMSSP
+    info['kernel'] = '{}.{}'.format(ntlmssp[48], ntlmssp[49])
+    info['build'] = '{}'.format(struct.unpack('<H', ntlmssp[50:52])[0])
+    flags = struct.unpack('<L', ntlmssp[20:24])[0]
+    info['auth_context'] = 'domain' if flags & 0x10000 else 'workgroup'
+    ti_len = struct.unpack('<H', ntlmssp[40:42])[0]
+    ti_offset = struct.unpack('<L', ntlmssp[44:48])[0]
+    ti = ntlmssp[ti_offset:ti_offset+ti_len]
+    logging.debug('TargetInfo-length '+str(ti_len))
+    parse_target_info(ti, info)
+    info['smbVersions'] = ', '.join(map(str, info['smbVersions']))
+    if smb1_signing is not None:
+        if smb1_signing & 0x8:
+            info['smb1_signing'] = 'required'
+        elif smb1_signing & 0x4:
+            info['smb1_signing'] = 'enabled'
+        else:
+            info['smb1_signing'] = 'disabled'
+    if smb2_signing is not None:
+        if smb2_signing & 0x2:
+            info['smb2_signing'] = 'required'
+        elif smb2_signing & 0x1:
+            info['smb2_signing'] = 'enabled'
+        else:
+            # this should never be the case on a Windows host
+            info['smb2_signing'] = 'disabled'
+    return info
+
+def get_uptime(addr, timeout=GTIMEOUT, port=445):
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
     ''' Return uptime string for SMB2+ hosts. Sends a SMB1 NegotiateProtocolRequest
     to elicit an SMB2 NegotiateProtocolRequest. Works even if SMB1 is disabled on
     the remote host. '''
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
+<<<<<<< HEAD
         s.connect((addr, 445))
+=======
+        s.connect((addr, port))
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
     except Exception:
         return None
     s.send(binascii.unhexlify(
@@ -247,7 +373,11 @@ class CachingConnection(ldap3.Connection):
         # kwargs['paged_cookie'] = cookie
 
         self.response = response
+<<<<<<< HEAD
         logger.debug('RESULT '+str(self.result))
+=======
+        logger.debug('RESULT {} {}'.format(len(self.response), str(self.result)))
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
         self.cache[sha1] = self.response
 
         if self.result['result'] == 4:
@@ -255,13 +385,21 @@ class CachingConnection(ldap3.Connection):
         #     kwargs['attributes'].append('range=1000-*')
         #     self.response += self.search(search_base, search_filter, search_scope=ldap3.SUBTREE, **kwargs)
         #     return self.response
+<<<<<<< HEAD
         
+=======
+
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
 private_addrs = (
     [2130706432, 4278190080], # 127.0.0.0,   255.0.0.0
     [3232235520, 4294901760], # 192.168.0.0, 255.255.0.0
     [2886729728, 4293918720], # 172.16.0.0,  255.240.0.0
     [167772160,  4278190080], # 10.0.0.0,    255.0.0.0
+<<<<<<< HEAD
 ) 
+=======
+)
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
 
 def is_private_addr(addr):
     addr = int.from_bytes(socket.inet_aton(addr), 'big')
@@ -310,7 +448,12 @@ def get_domain_controllers_by_ldap(conn, search_base):
     servers = []
     for s in conn.response:
         hostname = s['attributes']['dNSHostName'][0]
+<<<<<<< HEAD
         addr = get_addr_by_host(hostname, args.name_server)
+=======
+        addr = get_addr_by_host(hostname, args.name_server) or \
+               get_addr_by_host(hostname, args.server)
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
         if addr:
             servers.append([addr, hostname])
     return servers
@@ -340,7 +483,11 @@ def get_domain_controllers_by_dns(domain, name_server=None):
     servers = []
     for a in answer:
         hostname = str(a).split()[-1]
+<<<<<<< HEAD
         addr = get_addr_by_host(h, name_server)
+=======
+        addr = get_addr_by_host(hostname, name_server)
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
         if addr:
             servers.append([addr, hostname])
     return servers
@@ -361,7 +508,11 @@ def get_addrs_by_host(host, name_server=None):
         logger.debug('Resolved {} to {} via {}'.format(host, ', '.join([a.address for a in answer]),
                                                        name_server or 'default DNS'))
     except Exception:
+<<<<<<< HEAD
         logger.debug('Name resolution failed for '+host)
+=======
+        logger.debug('Name resolution failed for {} via {}'.format(host, name_server or 'default'))
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
         return []
     return [a.address for a in answer]
 
@@ -376,7 +527,11 @@ def get_fqdn_by_addr(addr, name_server=None):
         answer = resolver.query(arpa, 'PTR', 'IN')
         logger.debug('Resolved {} to {} via {}'.format(arpa, str(answer[0])[:-1], name_server or 'default'))
     except Exception:
+<<<<<<< HEAD
         logger.debug('Name resolution failed for '+arpa)
+=======
+        logger.debug('Name resolution failed for {} via {}'.format(arpa, name_server or 'default'))
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
         return None
     return str(answer[0])[:-1]
 
@@ -398,20 +553,39 @@ def get_users(conn, search_base, active_only=False):
     else:
         search_filter = '(objectCategory=user)'
     results = []
+<<<<<<< HEAD
     conn.search(search_base, "(&(objectCategory=user)(cn>=m))", attributes=['userPrincipalName'])
     results.extend(conn.response)
     conn.search(search_base, "(&(objectCategory=user)(!(cn>=m)))", attributes=['userPrincipalName'])
+=======
+    conn.search(search_base, "(&(objectCategory=user)(cn>=m))", attributes=['userPrincipalName', 'samAccountName'])
+    results.extend(conn.response)
+    conn.search(search_base, "(&(objectCategory=user)(!(cn>=m)))", attributes=['userPrincipalName', 'samAccountName'])
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
     results.extend(conn.response)
     return results
 
 def get_groups(conn, search_base):
+<<<<<<< HEAD
     ''' get all domain users '''
+=======
+    ''' get all domain groups '''
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
     # use domain as base to get builtin and domain groups in one query
     # alternatively, you can do 2 queries with bases:
     #    cn=users,cn=mydomain,cn=com
     #    cn=users,cn=builtins,cn=mydomain,cn=com
+<<<<<<< HEAD
     conn.search(search_base, '(objectCategory=group)', attributes=['objectSid', 'groupType'])
     return [g for g in conn.response if g.get('dn', None)]
+=======
+    results = []
+    conn.search(search_base, '(&(objectCategory=group)(cn>=m))', attributes=['objectSid', 'groupType'])
+    results.extend(conn.response)
+    conn.search(search_base, '(&(objectCategory=group)(!(cn>=m)))', attributes=['objectSid', 'groupType'])
+    results.extend(conn.response)
+    return [g for g in results if g.get('dn', None)]
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
 
 def get_computers(conn, search_base, attributes=[], hostnames=[]):
     attributes = list(set(attributes + ['name', 'dNSHostName', 'whenCreated', 'operatingSystem',
@@ -447,7 +621,11 @@ def gid_from_sid(sid):
     return struct.unpack('<H', sid[-4:-2])[0]
 
 def get_user_dn(conn, search_base, user):
+<<<<<<< HEAD
     conn.search(search_base, '(&(objectCategory=user)(|(userPrincipalName={}@*)(cn={})))'.format(user, user))
+=======
+    conn.search(search_base, '(&(objectCategory=user)(|(userPrincipalName={}@*)(cn={})(samAccountName={})))'.format(user, user, user))
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
     return conn.response[0]['dn']
 
 def get_user_groups(conn, search_base, user):
@@ -471,11 +649,22 @@ def get_user_groups(conn, search_base, user):
 def get_users_in_group(conn, search_base, group):
     ''' return all members of group '''
     groups = get_groups(conn, search_base)
+<<<<<<< HEAD
     group = [g for g in groups if cn(g.get('dn', '')).lower() == group.lower()][0] # get group dn
     gid = gid_from_sid(group['attributes']['objectSid'][0])
     # get all users with primaryGroupID of gid
     conn.search(search_base, '(&(objectCategory=user)(primaryGroupID={}))'.format(gid),
                 attributes=['distinguishedName', 'userPrincipalName'])
+=======
+    if group.find('=') > 0:
+        group = [g for g in groups if g.get('dn', '').lower() == group.lower()][0] # get group dn
+    else:
+        group = [g for g in groups if cn(g.get('dn', '')).lower() == group.lower()][0] # get group dn
+    gid = gid_from_sid(group['attributes']['objectSid'][0])
+    # get all users with primaryGroupID of gid
+    conn.search(search_base, '(&(objectCategory=user)(primaryGroupID={}))'.format(gid),
+                attributes=['distinguishedName', 'userPrincipalName', 'samAccountName'])
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
     users = [u for u in conn.response if u.get('dn', False)]
     # get all users in group using "memberOf" attribute. primary group is not included in the "memberOf" attribute
     conn.search(search_base, '(&(objectCategory=user)(memberOf='+group['dn']+'))', attributes=['distinguishedName', 'userPrincipalName'])
@@ -483,7 +672,12 @@ def get_users_in_group(conn, search_base, group):
     return users
 
 def get_pwd_policy(conn, search_base):
+<<<<<<< HEAD
     ''' return non-default password policies for the domain '''
+=======
+    ''' return non-default password policies for the domain. user must have read access to
+    policies in "Password Settings Container" '''
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
     base = 'cn=Password Settings Container,cn=System,'+search_base
     # https://technet.microsoft.com/en-us/library/2007.12.securitywatch.aspx
     attrs = [
@@ -643,10 +837,19 @@ def user_handler(args, conn):
         if not u.get('attributes'):
             continue
         a = u['attributes']
+<<<<<<< HEAD
         # print(a['objectGUID'])
         # print(a['objectSid'])
         # https://msdn.microsoft.com/en-us/library/ms680832.aspx
         print('UserName                 ', a['name'][0])
+=======
+        # https://msdn.microsoft.com/en-us/library/ms680832.aspx
+        try:
+            print('UserName                 ', a.get('samAccountName', None)[0] or \
+                  a.get('userPrincipalName')[0].split('@')[0])
+        except:
+            print('UserName                 ', cn(u['dn']))
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
         print('FullName                 ', get_attr(a, 'givenName', ''), get_attr(a, 'middleName', ''))
         print('DistinguishedName        ', a['distinguishedName'][0])
         print('UserPrincipalName        ', get_attr(a, 'userPrincipalName', ''))
@@ -655,24 +858,46 @@ def user_handler(args, conn):
         print('DisplayName              ', ' '.join(a['displayName']))
         print('E-mail                   ', ' '.join(a['mail']))
         print('JobTitle                 ', ' '.join(a['title']))
+<<<<<<< HEAD
         print('AccountCreated           ', gt_to_str(a['whenCreated'][0]))
         print('AccountActive            ', 'No' if int(a['userAccountControl'][0]) & 0x2 else 'Yes')
 
         try:
             print('AccountExpires           ', timestr_or_never(int(a['accountExpires'][0])))
+=======
+
+        try:
+            print('AccountCreated           ', gt_to_str(a['whenCreated'][0]))
+            print('AccountExpires           ', timestr_or_never(int(a['accountExpires'][0])))
+            print('AccountLocked            ', 'Yes' if int(a['userAccountControl'][0]) & 0x10 else 'No')
+            print('AccountActive            ', 'No' if int(a['userAccountControl'][0]) & 0x2 else 'Yes')
+        except:
+            pass
+
+        try:
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
             if len(a['lockoutTime']) == 0 or int(a['lockoutTime'][0]) == 0:
                 print('LockoutTime              ', 'No')
             else:
                 print('LockoutTime              ', timestr_or_never(int(a['lockoutTime'])))
+<<<<<<< HEAD
             print('AccountLocked            ', 'Yes' if int(a['userAccountControl'][0]) & 0x10 else 'No')
             print('FailedLogins             ', a['badPwdCount'][0])
             print('LastFailedLogin          ', timestr_or_never(int(a['badPasswordTime'][0])))
             print('LogonCount               ', a['logonCount'][0])
             print('LastLogon                ', timestr_or_never(int(a['lastLogon'][0])))
+=======
+            print('LastLogon                ', timestr_or_never(int(a['lastLogon'][0])))
+
+            print('FailedLogins             ', a['badPwdCount'][0])
+            print('LogonCount               ', a['logonCount'][0])
+            print('LastFailedLogin          ', timestr_or_never(int(a['badPasswordTime'][0])))
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
         except:
             pass
 
         try:
+<<<<<<< HEAD
             print('PasswordLastSet          ', timestr_or_never(int(a['pwdLastSet'][0])))
             print('PasswordExpires          ', 'No' if int(a['userAccountControl'][0]) & 0x10000 else 'Yes')
             #print('PasswordChangeable')
@@ -711,6 +936,71 @@ def users_handler(args, conn):
                 except:
                     # NOTE: CN is not guaranteed to be unique
                     print(cn(u['dn']))
+=======
+            # http://support.microsoft.com/kb/305144
+            print('PasswordLastSet          ', timestr_or_never(int(a['pwdLastSet'][0])))
+            print('PasswordExpires          ', 'No' if int(a['userAccountControl'][0]) & 0x10000 else 'Yes')
+            print('UserMayChangePassword    ', 'No' if int(a['userAccountControl'][0]) & 0x40 else 'Yes')
+        except:
+            pass
+
+        try:
+            groups = get_user_groups(conn, args.search_base, u['dn'])
+            primary_group = [g['dn'] for g in groups if struct.unpack(
+                '<H', g['attributes']['objectSid'][0][-4:-2])[0] == int(a['primaryGroupID'][0])][0]
+            print('PrimaryGroup              "{}"'.format(primary_group if args.dn else cn(primary_group)))
+            # group scopes: https://technet.microsoft.com/en-us/library/cc755692.aspx
+            GROUP_SYSTEM = 0x1
+            GROUP_GLOBAL = 0x2
+            GROUP_DOMAIN_LOCAL = 0x4
+            GROUP_UNIVERSAL = 0x8
+            XGROUP_LOCAL = GROUP_SYSTEM | GROUP_DOMAIN_LOCAL
+            XGROUP_GLOBAL = GROUP_GLOBAL | GROUP_UNIVERSAL
+            for g in groups:
+                logger.debug(hex(dw(int(g['attributes']['groupType'][0]))) + ' ' + cn(g['dn']))
+            local_groups = [g['dn'] for g in groups if dw(int(g['attributes']['groupType'][0])) & XGROUP_LOCAL]
+            global_groups = [g['dn'] for g in groups if dw(int(g['attributes']['groupType'][0])) & XGROUP_GLOBAL]
+            print('LocalGroupMemberships    ', ', '.join(map(lambda x:'"{}"'.format(x if args.dn else cn(x)), local_groups)))
+            print('GlobalGroupMemberships   ', ', '.join(map(lambda x:'"{}"'.format(x if args.dn else cn(x)), global_groups)))
+        except:
+            pass
+        print('')
+
+def users_handler(args, conn):
+    if args.privileged:
+        groups = set()
+        for g in get_groups(conn, args.search_base):
+            if 'admin' in g['dn'].lower() or g['dn'].split(',', maxsplit=1)[0][3:].lower() in \
+               ['domain admins', 'enterprise admins', 'account operators', 'schema admins']:
+                groups.add(g['dn'])
+        for g in sorted(groups):
+            logger.debug('Getting users in "{}"'.format(g))
+            members = get_users_in_group(conn, args.search_base, g)
+            if len(members) == 0:
+                continue
+            print('=', g if args.dn else cn(g), '=')
+            for u in members:
+                if args.dn:
+                    print(u['dn'])
+                else:
+                    try:
+                        print(u['attributes']['userPrincipalName'][0].split('@')[0])
+                    except:
+                        print(u['attributes'].get('samAccountName', [cn(u['dn'])])[0])
+            print()
+            # get accounts that can replicate the DC
+    else:
+        users = get_users(conn, args.search_base)
+        for u in users:
+            if 'dn' in u:
+                if args.dn:
+                    print(u['dn'])
+                else:
+                    try:
+                        print(u['attributes']['userPrincipalName'][0].split('@')[0])
+                    except:
+                        print(u['attributes'].get('samAccountName', [u['dn']])[0])
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
 
 def groups_handler(args, conn):
     for g in get_groups(conn, args.search_base):
@@ -736,9 +1026,15 @@ def ping_host(addr, timeout=GTIMEOUT):
     if not is_addr(addr):
         return False
     if sys.platform.lower().startswith('windows'):
+<<<<<<< HEAD
         cmd = 'ping -n 1 -w {} {}'.format(float(timeout), addr)
     else:
         cmd = 'ping -c 1 -W {} {}'.format(float(timeout), addr)
+=======
+        cmd = 'ping -n 1 -w {} {}'.format(int(timeout), addr)
+    else:
+        cmd = 'ping -c 1 -W {} {}'.format(int(timeout), addr)
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
     logger.debug('Running '+cmd)
     try:
         subprocess.check_call(cmd.split(), stderr=subprocess.STDOUT, stdout=open(os.devnull, 'w'))
@@ -868,9 +1164,13 @@ def query_handler(args, conn):
 def get_dc_info(args, conn=None):
     if not conn:
         server = ldap3.Server(args.server)
+<<<<<<< HEAD
         conn = CachingConnection(server, authentication=ldap3.ANONYMOUS, version=args.version, auto_bind=True,
                                  receive_timeout=GTIMEOUT)
 
+=======
+        conn = ldap3.Connection(server, auto_bind=True, version=args.version, receive_timeout=GTIMEOUT)
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
     conn.search('', '(objectClass=*)', search_scope=ldap3.BASE, dereference_aliases=ldap3.DEREF_NEVER,
                 attributes=['dnsHostName', 'supportedLDAPVersion', 'rootDomainNamingContext',
                             'domainFunctionality', 'forestFunctionality', 'domainControllerFunctionality'])
@@ -1015,6 +1315,10 @@ if __name__ == '__main__':
 
     users_parser = subparsers.add_parser('users', help='list all users')
     users_parser.set_defaults(handler=users_handler)
+<<<<<<< HEAD
+=======
+    users_parser.add_argument('-p', '--privileged', action='store_true', help='list privileged users')
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
     user_parser = subparsers.add_parser('user', help='get user info')
     user_parser.set_defaults(handler=user_handler)
     user_parser.add_argument('users', nargs='+', help='users to search')
@@ -1093,6 +1397,7 @@ if __name__ == '__main__':
     if not args.domain or args.domain.count('.') == 0:
         logger.debug('Checking for domain name')
         args.domain = None
+<<<<<<< HEAD
         if not args.server:
             if args.name_server:
                 args.domain = get_fqdn_by_addr(args.name_server, args.name_server)
@@ -1109,6 +1414,31 @@ if __name__ == '__main__':
             print('Error: Failed to get domain. Try supplying the fqdn with --domain')
             sys.exit()
         args.domain = args.domain.split('.', maxsplit=1)[-1]
+=======
+        fqdn = None
+        if not args.server:
+            if args.name_server:
+                fqdn = get_fqdn_by_addr(args.name_server, args.name_server)
+            else:
+                try:
+                    args.domain = [l.strip().split()[-1] for l in open('/etc/resolv.conf') if l.startswith('search ')][0]
+                except:
+                    pass
+        else:
+            fqdn = get_fqdn_by_addr(args.server, args.name_server)
+            if not fqdn and args.server != args.name_server:
+                # try query against the domain controller
+                fqdn = get_fqdn_by_addr(args.server, args.server)
+                if not fqdn:
+                    logger.debug('Querying LDAP for domain')
+                    info = get_dc_info(args)
+                    fqdn = 'fake.' + info['rootDomainNamingContext'][3:].lower().replace(',dc=', '.')
+        if fqdn:
+            args.domain = fqdn.split('.', maxsplit=1)[-1]
+        if not args.domain:
+            print('Error: Failed to get domain. Try supplying the fqdn with --domain')
+            sys.exit()
+>>>>>>> a8477a3a381e535a1b0db200b2424d7be6eb8f05
         logger.info('Found domain: '+args.domain)
 
     # determine port if not specified
