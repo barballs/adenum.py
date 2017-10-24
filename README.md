@@ -60,3 +60,15 @@ List domain controllers for provided domain.
 ```
 $ python3 getdc.py -d mydomain.local
 ```
+
+### smblogin2.py
+Uses impacket to login to hosts with given creds and checks for admin access via the ADMIN$ share.
+```
+$ python2 smblogin2.py -u USERNAME -p PASSWORD HOST1 [..HOSTN]
+```
+
+### active_users.py
+Enumerate active users on given hosts using MSRPC over SMB. The Win32 API is NetWkstaUserEnum.
+```
+$ python2 active_users.py -u USERNAME -p PASSWORD HOST1 [..HOSTN]
+```
