@@ -70,11 +70,7 @@ https://msdn.microsoft.com/en-us/library/ms675090(v=vs.85).aspx
 '''
 
 logger = logging.getLogger(__name__)
-GTIMEOUT = 2
-
-def set_global_timeout(t):
-    global GTIMEOUT
-    GTIMEOUT = t
+TIMEOUT = 2
 
 def parse_target_info(ti, info):
     ''' parse the target info section of an NTLMSSP negotiation '''
@@ -98,7 +94,7 @@ def parse_target_info(ti, info):
     parse_target_info(ti[4+l:], info)
 
 
-def get_smb_info(addr, timeout=GTIMEOUT, port=445):
+def get_smb_info(addr, timeout=TIMEOUT, port=445):
     info = {'smbVersions':set()}
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
@@ -255,28 +251,6 @@ def get_smb_info(addr, timeout=GTIMEOUT, port=445):
             info['smb2_signing'] = 'disabled'
     return info
 
-def get_uptime(addr, timeout=GTIMEOUT, port=445):
-    ''' Return uptime string for SMB2+ hosts. Sends a SMB1 NegotiateProtocolRequest
-    to elicit an SMB2 NegotiateProtocolRequest. Works even if SMB1 is disabled on
-    the remote host. '''
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
-    try:
-        s.connect((addr, port))
-    except Exception:
-        return None
-    s.send(binascii.unhexlify(
-        b'00000039ff534d4272000000001843c80000000000000000000000000000f'
-        b'eff0000000000160002534d4220322e3030320002534d4220322e3f3f3f00'
-    ))
-    data = s.recv(0x7d)
-    s.shutdown(socket.SHUT_RDWR)
-    if data[4] != 0xfe:
-        return None
-    logger.debug(addr+' SMB2 Dialect '+hex(struct.unpack('<H', data[0x48:0x4a])[0]))
-    boottime = datetime.datetime.fromtimestamp((struct.unpack('<Q', data[0x74:0x7c])[0] / 10000000) - 11644473600)
-    return str(datetime.datetime.now() - boottime) + ' (booted '+boottime.strftime('%H:%M:%S %d %b %Y')+')'
-
 
 class CachingConnection(ldap3.Connection):
     ''' Subclass of ldap3.Connection which uses the range attribute
@@ -284,11 +258,12 @@ class CachingConnection(ldap3.Connection):
     def __init__(self, *args, **kwargs):
         self.cache = {}
         kwargs['auto_range'] = True
+        self.timeout = kwargs['timeout']
         ldap3.Connection.__init__(self, *args, **kwargs)
     def search(self, search_base, search_filter, search_scope=ldap3.SUBTREE, **kwargs):
         if 'attributes' not in kwargs:
             kwargs['attributes'] = []
-        kwargs['time_limit'] = GTIMEOUT
+        kwargs['time_limit'] = self.timeout
         #kwargs['paged_size'] = 1000
         #kwargs['paged_criticality'] = True
 
@@ -366,7 +341,7 @@ def get_attr(o, attr, default=None, trans=None):
         return trans(v)
     return v
 
-def get_resolver(name_server=None, timeout=GTIMEOUT):
+def get_resolver(name_server=None, timeout=TIMEOUT):
     if name_server:
         resolver = dns.resolver.Resolver()
         resolver.nameservers = [name_server]
@@ -377,21 +352,21 @@ def get_resolver(name_server=None, timeout=GTIMEOUT):
     resolver.lifetime = timeout
     return resolver
 
-def get_domain_controllers_by_ldap(conn, search_base):
+def get_domain_controllers_by_ldap(conn, search_base, timeout=TIMEOUT):
     search_base = 'OU=Domain Controllers,'+search_base
     conn.search(search_base, '(objectCategory=computer)', search_scope=ldap3.LEVEL, attributes=['dNSHostName'])
     servers = []
     for s in conn.response:
         hostname = s['attributes']['dNSHostName'][0]
-        addr = get_addr_by_host(hostname, args.name_server) or \
-               get_addr_by_host(hostname, args.server)
+        addr = get_addr_by_host(hostname, args.name_server, timeout) or \
+               get_addr_by_host(hostname, args.server, timeout)
         if addr:
             servers.append([addr, hostname])
     return servers
 
-def get_domain_controllers_by_dns(domain, name_server=None):
+def get_domain_controllers_by_dns(domain, name_server=None, timeout=TIMEOUT):
     ''' return the domain controller addresses for a given domain '''
-    resolver = get_resolver(name_server)
+    resolver = get_resolver(name_server, timeout)
     queries = [
         ('_ldap._tcp.dc._msdcs.'+domain, 'SRV'), # joining domain
         ('_ldap._tcp.'+domain, 'SRV'),
@@ -414,7 +389,7 @@ def get_domain_controllers_by_dns(domain, name_server=None):
     servers = []
     for a in answer:
         hostname = str(a).split()[-1]
-        addr = get_addr_by_host(hostname, name_server)
+        addr = get_addr_by_host(hostname, name_server, timeout)
         if addr:
             servers.append([addr, hostname])
     return servers
@@ -427,9 +402,9 @@ def get_host_by_name(host):
         pass
     return None
 
-def get_addrs_by_host(host, name_server=None):
+def get_addrs_by_host(host, name_server=None, timeout=TIMEOUT):
     ''' return list of addresses for the host '''
-    resolver = get_resolver(name_server)
+    resolver = get_resolver(name_server, timeout)
     try:
         answer = resolver.query(host)
         logger.debug('Resolved {} to {} via {}'.format(host, ', '.join([a.address for a in answer]),
@@ -439,12 +414,12 @@ def get_addrs_by_host(host, name_server=None):
         return []
     return [a.address for a in answer]
 
-def get_addr_by_host(host, name_server=None):
-    addrs = get_addrs_by_host(host, name_server)
+def get_addr_by_host(host, name_server=None, timeout=TIMEOUT):
+    addrs = get_addrs_by_host(host, name_server, timeout)
     return addrs[0] if len(addrs) else None
 
-def get_fqdn_by_addr(addr, name_server=None):
-    resolver = get_resolver(name_server)
+def get_fqdn_by_addr(addr, name_server=None, timeout=TIMEOUT):
+    resolver = get_resolver(name_server, timeout)
     arpa = '.'.join(reversed(addr.split('.'))) + '.in-addr.arpa.'
     try:
         answer = resolver.query(arpa, 'PTR', 'IN')
@@ -454,8 +429,8 @@ def get_fqdn_by_addr(addr, name_server=None):
         return None
     return str(answer[0])[:-1]
 
-def get_host_by_addr(addr, name_server=None):
-    fqdn = get_fqdn_by_addr(addr, name_server)
+def get_host_by_addr(addr, name_server=None, timeout=TIMEOUT):
+    fqdn = get_fqdn_by_addr(addr, name_server, timeout)
     if fqdn:
         return fqdn.split('.', maxsplit=1)[0]
     return None
@@ -673,9 +648,9 @@ def get_default_pwd_policy(args, conn):
                 import smb.ntlm
                 smb.ntlm.MD4 = MyMD4Class.new
             dc_hostname = args.hostname or \
-                          get_host_by_addr(args.server, args.name_server) or \
-                          get_host_by_addr(args.server, args.server) or \
-                          get_host_by_addr(args.server)
+                          get_host_by_addr(args.server, args.name_server, args.timeout) or \
+                          get_host_by_addr(args.server, args.server, args.timeout) or \
+                          get_host_by_addr(args.server, timeout=args.timeout)
             if not dc_hostname:
                 raise socket.herror
             logger.debug('dc_hostname: '+dc_hostname)
@@ -847,7 +822,7 @@ def group_handler(args, conn):
             except:
                 print(cn(u['dn']))
 
-def ping_host(addr, timeout=GTIMEOUT):
+def ping_host(addr, timeout=TIMEOUT):
     ''' check if host is alive by first calling out to ping, then
     by initiating a connection on tcp/445 '''
     if not is_addr(addr):
@@ -877,22 +852,19 @@ def computer_info_thread(computer, args):
     info = ''
     if args.resolve or args.uptime or args.alive:
         for name_server in set([args.name_server, args.server, None]):
-            addr = get_addr_by_host(hostname, name_server)
+            addr = get_addr_by_host(hostname, name_server, args.timeout)
             if addr:
                 break
         if addr:
-            if args.alive and not ping_host(addr):
+            if args.alive and not ping_host(addr, args.timeout):
                 logger.debug('Host '+addr+' is down')
                 return
             info = 'Address: {}\n'.format(addr)
             if args.uptime:
-                smbinfo = get_smb_info(addr)
+                smbinfo = get_smb_info(addr, args.timeout, args.smb_port)
                 if smbinfo:
                     for k in sorted(smbinfo.keys()):
                         info += '{}: {}\n'.format(k, smbinfo[k])
-                # uptime = get_uptime(addr)
-                # if uptime:
-                #     info += 'uptime: {}\n'.format(uptime)
         elif args.alive:
             logger.debug('Host '+addr+' may be down')
             return
@@ -985,7 +957,7 @@ def query_handler(args, conn):
 def get_dc_info(args, conn=None):
     if not conn:
         server = ldap3.Server(args.server)
-        conn = ldap3.Connection(server, auto_bind=True, version=args.version, receive_timeout=GTIMEOUT)
+        conn = ldap3.Connection(server, auto_bind=True, version=args.version, receive_timeout=args.timeout, timeout=args.timeout)
     conn.search('', '(objectClass=*)', search_scope=ldap3.BASE, dereference_aliases=ldap3.DEREF_NEVER,
                 attributes=['dnsHostName', 'supportedLDAPVersion', 'rootDomainNamingContext',
                             'domainFunctionality', 'forestFunctionality', 'domainControllerFunctionality'])
@@ -1013,7 +985,7 @@ def dc_handler(args, conn):
         6:'2012r2',
         7:'2016',
     }
-    servers = get_domain_controllers_by_ldap(get_connection(args), args.search_base)
+    servers = get_domain_controllers_by_ldap(get_connection(args), args.search_base, args.timeout)
     for addr, hostname in servers:
         r = get_dc_info(args, get_connection(args, addr))
         print('address                         ', addr)
@@ -1084,7 +1056,7 @@ def get_connection(args, addr=None):
     auth = ldap3.ANONYMOUS if args.anonymous else ldap3.NTLM
     conn = CachingConnection(server, user=username, password=password, authentication=auth,
                              version=args.version, read_only=True, auto_range=True,
-                             auto_bind=False, receive_timeout=args.timeout)
+                             auto_bind=False, receive_timeout=args.timeout, timeout=args.timeout)
 
     conn.open()
     if args.starttls:
@@ -1104,7 +1076,7 @@ if __name__ == '__main__':
     parser.add_argument('-s', '--server', help='domain controller addr or name. default: dns lookup on domain')
     parser.add_argument('-H', '--hostname', help='DC hostname. never required')
     parser.add_argument('-d', '--domain', help='default is to use domain of server')
-    parser.add_argument('--timeout', type=int, default=GTIMEOUT, help='timeout for network operations')
+    parser.add_argument('--timeout', type=int, default=TIMEOUT, help='timeout for network operations')
     #parser.add_argument('--delay', type=int, default=0.0, help='delay between ldap queries')
     parser.add_argument('--threads', type=int, default=50, help='name resolution/uptime worker count')
     parser.add_argument('--port', type=int, help='default 389 or 636 with --tls. 3268 for global catalog')
@@ -1182,7 +1154,6 @@ if __name__ == '__main__':
     modify_parser.add_argument('values', nargs='*', default=[], help='value(s) to add/modify')
 
     args = parser.parse_args()
-    GTIMEOUT = args.timeout
 
     if args.debug:
         logger.setLevel(logging.DEBUG)
@@ -1202,7 +1173,7 @@ if __name__ == '__main__':
 
     if args.server and not is_addr(args.server):
         # resolve DC hostname
-        args.server = get_addr_by_host(args.server, args.name_server) or get_host_by_name(args.server)
+        args.server = get_addr_by_host(args.server, args.name_server, args.timeout) or get_host_by_name(args.server)
         if not args.server:
             print('Error: Failed to resolve DC hostname')
             sys.exit()
@@ -1219,17 +1190,17 @@ if __name__ == '__main__':
         fqdn = None
         if not args.server:
             if args.name_server:
-                fqdn = get_fqdn_by_addr(args.name_server, args.name_server)
+                fqdn = get_fqdn_by_addr(args.name_server, args.name_server, args.timeout)
             else:
                 try:
                     args.domain = [l.strip().split()[-1] for l in open('/etc/resolv.conf') if l.startswith('search ')][0]
                 except:
                     pass
         else:
-            fqdn = get_fqdn_by_addr(args.server, args.name_server)
+            fqdn = get_fqdn_by_addr(args.server, args.name_server, args.timeout)
             if not fqdn and args.server != args.name_server:
                 # try query against the domain controller
-                fqdn = get_fqdn_by_addr(args.server, args.server)
+                fqdn = get_fqdn_by_addr(args.server, args.server, args.timeout)
                 if not fqdn:
                     logger.debug('Querying LDAP for domain')
                     info = get_dc_info(args)
@@ -1252,7 +1223,7 @@ if __name__ == '__main__':
         # attempt to find a DC
         logger.info('Looking for domain controller for '+args.domain)
         try:
-            args.server = get_domain_controllers_by_dns(args.domain, args.name_server)[0][0]
+            args.server = get_domain_controllers_by_dns(args.domain, args.name_server, args.timeout)[0][0]
         except IndexError:
             print('Error: Failed to find a domain controller')
             sys.exit()
