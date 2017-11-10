@@ -15,26 +15,11 @@ logger = logging.getLogger(__name__)
 
 
 def get_all(conn, search_base, simple_filter, attributes=[]):
-    ''' this whole routine could be better '''
+    ''' TODO this is broken '''
     if '(cn' in simple_filter.lower():
         raise ValueError('search filter must not contain CN')
 
     cs = '0123456789abcdefghijklmnopqrstuvwxyz'
-    def half(l, r):
-        if r[-1] == cs[0]:
-            r += cs[-1]
-        else:
-            r = r[:-1] + cs[math.floor(cs.index(r[-1])/2)]
-        if r <= l:
-            d = len(l) - len(r)
-            if d > 0:
-                # l is longer than r
-                r = l + (d*cs[0])
-                r = r[:-1] + cs[-1]
-            else:
-                r = l + cs[-1]
-        return l, r
-
     l, r = cs[0], cs[-1]
     ft = '(&{}(cn>={})(cn<={}))'
     results = []
@@ -43,7 +28,14 @@ def get_all(conn, search_base, simple_filter, attributes=[]):
         conn.search(search_base, f, attributes=attributes)
         if conn.result['result'] == 4:
             # reached max results
-            l, r = half(l, r)
+            if cs.index(l) == cs.index(r) + 1:
+                logger.debug('Failed to limit results. Moving on')
+                results.extend(conn.response)
+                ft = '(&{}(!(cn<={}))(cn<={}))'
+                l = r
+                r = cs[-1]
+            else:
+                r = cs[cs.index(l)+1]
         elif r == cs[-1]:
             # done
             results.extend(conn.response)
