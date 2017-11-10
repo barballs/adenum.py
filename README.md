@@ -5,7 +5,7 @@ Remote Active Directory enumeration
 
 You'll need to install ldap3, dnspython, and pysmb:
 ```
-pip3 install ldap3 dnspython pysmb
+pip3 install -r requirements.txt
 ```
 
 To read the default password policy from the SYSVOL share, you'll need either smbclient or pysmb.

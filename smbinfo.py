@@ -11,12 +11,12 @@ import concurrent.futures
 import threading
 import xml.etree.ElementTree as ET
 
-from adenum import get_smb_info
+from modules.utils import get_smb_info
 
 def get_smb_info_thread(addr, args):
     info = get_smb_info(addr, args.timeout, args.smb_port)
     if args.version:
-        if info['auth_context'] == 'workgroup':
+        if info['auth_realm'] == 'workgroup':
             s = '{} (nativelm:{}) (kernel:{}) (build:{}) (workgroup:{}) (name:{})'.format(
                 addr, info.get('native_lm', ''), info.get('kernel', ''), info.get('build', ''),
                 info['netbios_domain'], info['netbios_name'])
@@ -37,7 +37,7 @@ def get_smb_info_thread(addr, args):
         if args.all:
             s += 'Uptime:        {}\n'.format(info.get('uptime', ''))
             s += 'Date:          {}\n'.format(info.get('date', ''))
-            s += 'AuthRealm:     {}\n'.format(info['auth_context'])
+            s += 'AuthRealm:     {}\n'.format(info['auth_realm'])
             s += 'DnsDomain:     {}\n'.format(info['dns_domain'])
             s += 'DnsName:       {}\n'.format(info['dns_name'])
             s += 'NetBIOSDomain: {}\n'.format(info['netbios_domain'])
