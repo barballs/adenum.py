@@ -3,7 +3,6 @@ Remote Active Directory enumeration
 
 ## Installation
 
-You'll need to install ldap3, dnspython, and pysmb:
 ```
 pip3 install -r requirements.txt
 ```

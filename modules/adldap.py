@@ -7,12 +7,25 @@ import tempfile
 import subprocess
 import configparser
 
+from smb.SMBConnection import SMBConnection
+import smb.ntlm
+
 from modules.adldap import *
 from modules.convert import *
 from modules.names import *
 
 logger = logging.getLogger(__name__)
 
+
+class MyMD4Class():
+    ''' class to add pass-the-hash support to pysmb '''
+    @staticmethod
+    def new():
+        return MyMD4Class()
+    def update(self, p):
+        self.nthash = binascii.unhexlify(p.decode('utf-16-le'))
+    def digest(self):
+        return self.nthash
 
 def get_all(conn, search_base, simple_filter, attributes=[]):
     ''' TODO this is broken '''
@@ -195,16 +208,6 @@ def get_user_info(conn, search_base, user):
     conn.search(search_base, '(&(objectCategory=user)(distinguishedName={}))'.format(user_dn), attributes=attrs)
     return conn.response
 
-class MyMD4Class():
-    ''' class to add pass-the-hash support to pysmb '''
-    @staticmethod
-    def new():
-        return MyMD4Class()
-    def update(self, p):
-        self.nthash = binascii.unhexlify(p.decode('utf-16-le'))
-    def digest(self):
-        return self.nthash
-
 def get_default_pwd_policy(args, conn):
     ''' default password policy is what gets returned by "net accounts"
     The policy is stored as a GPO on the sysvol share. It's stored in an INI file.
@@ -219,48 +222,15 @@ def get_default_pwd_policy(args, conn):
     sysvol, rel_path = gpo_path[2:].split('\\', 2)[-2:]
     rel_path += r'\MACHINE\Microsoft\Windows NT\SecEdit\GptTmpl.inf'
     tmp_file = tempfile.NamedTemporaryFile(prefix='GptTmpl_', suffix='.inf')
-    if not args.smbclient:
-        try:
-            from smb.SMBConnection import SMBConnection
-            if args.nthash:
-                import smb.ntlm
-                smb.ntlm.MD4 = MyMD4Class.new
-            dc_hostname = args.hostname or \
-                          get_host_by_addr(args.server, args.name_server, args.timeout) or \
-                          get_host_by_addr(args.server, args.server, args.timeout) or \
-                          get_host_by_addr(args.server, timeout=args.timeout)
-            if not dc_hostname:
-                raise socket.herror
-            logger.debug('dc_hostname: '+dc_hostname)
-            use_pysmb = True
-        except (ImportError, socket.herror) as e:
-            if type(e) == ImportError:
-                logger.info('Install pysmb to remove smbclient dependency')
-            elif type(e) == socket.herror:
-                logger.info('Failed to resolve server address')
-            use_pysmb = False
-    else:
-        use_pysmb = False
-
-    if use_pysmb:
-        logger.debug('SMBConnection("{}", "{}", "adenum", "{}", domain="{}")'.format(
-            args.username, '*', dc_hostname, args.domain))
-        conn = SMBConnection(args.username, args.password, 'adenum', dc_hostname, use_ntlm_v2=True,
-                             domain=args.domain, is_direct_tcp=(args.smb_port != 139))
-        logger.debug('connecting {}:{}'.format(args.server, args.smb_port))
-        conn.connect(args.server, port=args.smb_port)
-        attrs, size = conn.retrieveFile(sysvol, rel_path, tmp_file)
-    else:
-        if args.proxy:
-            raise RuntimeError('Cannot use smbclient when --proxy is used')
-        cmd = ['smbclient', '-p', str(args.smb_port), '--user={}\\{}'.format(args.domain, args.username),
-               '//{}/{}'.format(args.server, sysvol), '-c', 'get "{}" {}'.format(rel_path, tmp_file.name)]
-        if args.nthash:
-            cmd.insert(1, '--pw-nt-hash')
-        logger.info('Running '+' '.join(cmd))
-        result = subprocess.run(cmd, input=args.password.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        logger.debug(result.stdout.decode())
-        logger.debug(result.stderr.decode())
+    md4_tmp = smb.ntlm.MD4
+    if args.nthash:
+        smb.ntlm.MD4 = MyMD4Class.new
+    conn = SMBConnection(args.username, args.password, 'adenum', args.server, use_ntlm_v2=True,
+                         domain=args.domain, is_direct_tcp=(args.smb_port != 139))
+    logger.debug('connecting {}:{}'.format(args.server, args.smb_port))
+    conn.connect(args.server, port=args.smb_port)
+    smb.ntlm.MD4 = md4_tmp
+    attrs, size = conn.retrieveFile(sysvol, rel_path, tmp_file)
     tmp_file.seek(0)
     inf = tmp_file.read()
     if inf[:2] == b'\xff\xfe':
@@ -275,7 +245,7 @@ def get_default_pwd_policy(args, conn):
 def get_dc_info(args, conn=None):
     if not conn:
         server = ldap3.Server(args.server)
-        conn = ldap3.Connection(server, auto_bind=True, version=args.version, receive_timeout=args.timeout, timeout=args.timeout)
+        conn = ldap3.Connection(server, auto_bind=True, version=args.version, receive_timeout=args.timeout)
     conn.search('', '(objectClass=*)', search_scope=ldap3.BASE, dereference_aliases=ldap3.DEREF_NEVER,
                 attributes=['dnsHostName', 'supportedLDAPVersion', 'rootDomainNamingContext',
                             'domainFunctionality', 'forestFunctionality', 'domainControllerFunctionality'])

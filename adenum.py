@@ -8,11 +8,13 @@ import argparse
 # non-std
 import ldap3
 import socks
+import dns.query
 
 # local modules
 import plugins
 from modules.utils import *
 from modules.names import *
+from modules.adldap import *
 from modules.config import *
 from modules.convert import *
 from modules.connection import *
@@ -59,7 +61,6 @@ List domain joined computers. Add -r and -u to resolve hostnames and get uptime 
 
 = TODO =
 Find a better workaround for AD 1000 results limit.
---proxy won't forward DNS requests
 
 = RESOURCES =
 
@@ -103,6 +104,8 @@ if __name__ == '__main__':
     plugin_list = plugins.load_plugins(subparsers)
     args = parser.parse_args()
 
+    socket.setdefaulttimeout(args.timeout)
+
     if args.debug:
         h = logging.StreamHandler()
         h.setFormatter(logging.Formatter('[%(levelname)s] %(filename)s:%(lineno)s %(message)s'))
@@ -125,6 +128,7 @@ if __name__ == '__main__':
         proxy_host, proxy_port = args.proxy.split(':')
         socks.set_default_proxy(socks.SOCKS5, proxy_host, int(proxy_port))
         socket.socket = socks.socksocket
+        dns.query.socket_factory = socks.socksocket
 
     if args.server and not is_addr(args.server):
         # resolve DC hostname

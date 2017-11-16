@@ -3,8 +3,12 @@ import sys
 import argparse
 import logging
 import adenum
+from modules.utils import get_domain_controllers_by_dns
+from modules.names import get_fqdn_by_addr
 
 logger = logging.getLogger(adenum.__name__)
+
+
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-d', '--domain', help='domain')
@@ -19,7 +23,7 @@ if args.debug:
 
 if not args.domain:
     if args.name_server:
-        name = adenum.get_fqdn_by_addr(args.name_server, args.name_server)
+        name = get_fqdn_by_addr(args.name_server, args.name_server)
         if name:
             args.domain = name.split('.', maxsplit=1)[-1]
 
@@ -27,8 +31,8 @@ if not args.domain:
     print('Error: must specify a domain')
     sys.exit()
 
-for addr in adenum.get_domain_controllers(args.domain, args.name_server):
-    name = adenum.get_fqdn_by_addr(addr, args.name_server)
+for addr in get_domain_controllers_by_dns(args.domain, args.name_server):
+    name = get_fqdn_by_addr(addr, args.name_server)
     if name:
         print(addr, '\t', name)
     else:

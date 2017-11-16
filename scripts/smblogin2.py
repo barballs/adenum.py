@@ -35,6 +35,8 @@ def login(host, args):
     try:
         if args.nthash:
             smbconn.login(args.username, '', nthash=args.password, domain=args.domain)
+        elif args.nthash:
+            smbconn.login(args.username, '', lmhash=args.password, domain=args.domain)
         else:
             smbconn.login(args.username, args.password, domain=args.domain)
     except impacket.smbconnection.SessionError as e:
@@ -87,7 +89,9 @@ if __name__ == '__main__':
     pass_parser = parser.add_mutually_exclusive_group()
     pass_parser.add_argument('-p', '--password', default='')
     pass_parser.add_argument('-P', '--prompt', action='store_true', default='')
-    parser.add_argument('--nthash', action='store_true', help='pass NT hash as password')
+    hash_group = parser.add_mutually_exclusive_group()
+    hash_group.add_argument('--nthash', action='store_true', help='pass NT hash as password')
+    hash_group.add_argument('--lmhash', action='store_true', help='pass LM hash as password')
     parser.add_argument('-d', '--domain', default='.', help='domain. default is local')
     parser.add_argument('-w', '--threads', type=int, default=1, help='default 1')
     parser.add_argument('-t', '--timeout', type=int, default=3, help='socket timeout. default 3s')

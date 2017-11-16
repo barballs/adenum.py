@@ -250,7 +250,8 @@ def get_smb_info(addr, timeout=TIMEOUT, port=445):
         native_offset = 47 + struct.unpack('<H', data[43:45])[0]
         # align to 16 bits
         native_offset += native_offset % 2
-        native_os, native_lm = data[native_offset:].split(b'\x00\x00\x00', maxsplit=1)
+        # Samba may place a 3rd "Primary Domain" field here.
+        native_os, native_lm = data[native_offset:].split(b'\x00\x00\x00', maxsplit=2)[:2]
         native_os += b'\x00'
         native_lm = native_lm.rstrip(b'\x00') + b'\x00'
         info['native_os'] = native_os.decode('utf-16-le')
